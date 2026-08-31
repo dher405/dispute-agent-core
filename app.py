@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import db
 
@@ -42,7 +43,12 @@ else:
         st.info(f"**Statute Basis:** {lead['governing_statute']}\n\n**AI Reasoning:** {lead['ai_reasoning']}")
 
         if lead['consent_obtained']:
-            st.success(f"Customer Authorized: {lead['full_name']} ({lead['email']}) | Stripe: {lead['stripe_customer_id']}")
+            msg = f"**Customer:** {lead['full_name']} ({lead['email']}) | **Customer ID:** `{lead['stripe_customer_id']}`"
+            if lead.get('fee_charged_amount') and float(lead['fee_charged_amount']) > 0:
+                msg += f"\n\n**Settled:** Collected **${float(lead['fee_charged_amount']):,.2f}** | **Payment Intent:** `{lead.get('stripe_payment_intent_id') or 'pi_mock_success'}`"
+            st.success(msg)
+            api_base = os.getenv("API_PUBLIC_URL", "https://dispute-api-xyl7.onrender.com")
+            st.link_button("📄 Download DOT Statutory Demand Package", f"{api_base}/api/v1/claims/{lead['lead_id']}/generate-letter")
 
     with right:
         st.markdown("### 2. Actions & Outreach Control")

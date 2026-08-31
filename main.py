@@ -1,3 +1,5 @@
+from fastapi import Response
+from letter_generator import generate_demand_pdf
 import os
 import json
 from fastapi import FastAPI, HTTPException
@@ -217,7 +219,7 @@ def settle_contingency_commission(payload: SettlementTrigger):
                 )
                 payment_intent_id = intent.id
 
-            cur.execute("UPDATE lead_contacts SET fee_charged_amount = %s WHERE lead_id = %s;", (charge_amount, payload.lead_id))
+            cur.execute("UPDATE lead_contacts SET fee_charged_amount = %s, stripe_payment_intent_id = %s WHERE lead_id = %s;", (charge_amount, payment_intent_id, payload.lead_id))
             cur.execute("UPDATE leads SET status = 'won' WHERE id = %s;", (payload.lead_id,))
             conn.commit()
 
@@ -244,3 +246,22 @@ async def start_background_dispatcher():
             await asyncio.sleep(60) # Run every 60 seconds
 
     asyncio.create_task(dispatcher_loop())
+
+@app.get("/api/v1/claims/{lead_id}/generate-letter")
+def download_demand_letter(lead_id: str):
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE lead_id = %s;", (lead_id,))
+            claim = cur.fetchone()
+            if not claim:
+                raise HTTPException(status_code=404, detail="Claim not found")
+
+        pdf_bytes = generate_demand_pdf(dict(claim))
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=demand_letter_{lead_id}.pdf"}
+        )
+    finally:
+        conn.close()
