@@ -229,3 +229,18 @@ def settle_contingency_commission(payload: SettlementTrigger):
             }
     finally:
         conn.close()
+
+import asyncio
+from worker import dispatch_approved_outreach
+
+@app.on_event("startup")
+async def start_background_dispatcher():
+    async def dispatcher_loop():
+        while True:
+            try:
+                dispatch_approved_outreach()
+            except Exception as e:
+                print(f"[WORKER LOOP ERROR] {e}")
+            await asyncio.sleep(60) # Run every 60 seconds
+
+    asyncio.create_task(dispatcher_loop())
