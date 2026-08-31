@@ -1,3 +1,9 @@
+
+query_params = st.query_params
+if "claim_id" in query_params or query_params.get("view") == ["track"]:
+    render_claim_tracking_page(query_params.get("claim_id", ""))
+    st.stop()
+
 import os
 import streamlit as st
 import db
@@ -73,3 +79,59 @@ else:
                 db.update_lead_review_status(selected_lead_id, "staged_for_review", copy_draft, recovery_amt)
                 st.info("Draft edits saved.")
                 st.rerun()
+
+
+import streamlit as st
+import requests
+import os
+
+API_BASE_URL = os.getenv("API_BASE_URL", "https://dispute-api-xyl7.onrender.com")
+
+def render_claim_tracking_page(claim_id: str):
+    st.title("Dispute Case Tracker")
+    st.markdown("Real-time statutory passenger rights enforcement status.")
+
+    if not claim_id:
+        claim_id = st.text_input("Enter your Claim Reference ID:", placeholder="e.g. t3_1w3oogm")
+        if not claim_id:
+            st.info("Please enter your Claim ID from your confirmation SMS or email.")
+            return
+
+    with st.spinner("Retrieving claim record..."):
+        try:
+            res = requests.get(f"{API_BASE_URL}/api/v1/claims/track/{claim_id.strip()}", timeout=10)
+            if res.status_code == 404:
+                st.error("No dispute record found for reference ID: " + claim_id)
+                return
+            elif res.status_code != 200:
+                st.error(f"Error fetching dispute: HTTP {res.status_code}")
+                return
+            
+            data = res.json()
+        except Exception as err:
+            st.error(f"Failed to connect to dispute engine: {err}")
+            return
+
+    # Status Timeline Card
+    status = data.get("status", "pending")
+    status_steps = {
+        "staged_for_review": "AI Assessment Staged",
+        "approved": "Outreach & Notice Prepared",
+        "opted_in": "Statutory Demand Authorized",
+        "dispatched": "Served on Carrier Claims Desk",
+        "carrier_acknowledged": "Under Airline Legal Review",
+        "settled": "Compensation Recovery Completed"
+    }
+
+    st.success(f"Dispute Status: **{status_steps.get(status, status.replace('_', ' ').title())}**")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Disputed Carrier", data.get("carrier"))
+        st.metric("Flight / Disruption", data.get("flight"))
+    with col2:
+        st.metric("Statutory Demand Amount", f"${data.get('amount', 0.0):,.2f}")
+        st.metric("Governing Law", data.get("statute"))
+
+    st.markdown("---")
+    st.caption(f"Last system update: {data.get('last_updated')} | Reference: `{data.get('lead_id')}`")

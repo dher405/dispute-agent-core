@@ -289,3 +289,43 @@ def get_egress_ip():
         return {"mode": "proxied" if proxies else "direct", "egress_ip": res.json().get("ip")}
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/api/v1/claims/track/{lead_id}")
+def get_claim_tracking_status(lead_id: str):
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT lead_id, status, source_platform, carrier_name, 
+                   incident_identifier, estimated_compensation, regulatory_framework,
+                   claimant_name, updated_at, created_at
+            FROM leads
+            WHERE lead_id = %s
+            """,
+            (lead_id,)
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Claim not found")
+
+        return {
+            "lead_id": row.get("lead_id"),
+            "status": row.get("status"),
+            "carrier": row.get("carrier_name") or "Airline Carrier",
+            "flight": row.get("incident_identifier") or "Disrupted Flight",
+            "amount": float(row.get("estimated_compensation") or 0.0),
+            "statute": row.get("regulatory_framework") or "14 CFR Part 260 / Montreal Convention",
+            "name": row.get("claimant_name") or "Authorized Passenger",
+            "last_updated": str(row.get("updated_at") or row.get("created_at"))
+        }
+    except Exception as e:
+        if conn:
+            conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
