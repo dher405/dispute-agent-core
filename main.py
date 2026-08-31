@@ -274,3 +274,17 @@ async def start_reddit_poller():
     t = threading.Thread(target=poll_reddit_public_feed, daemon=True)
     t.start()
     print("[POLISHER] Background Reddit poller thread started.", flush=True)
+
+
+@app.get("/api/v1/system/egress-ip")
+def get_egress_ip():
+    proxies = {
+        "http": "socks5h://localhost:1055",
+        "https": "socks5h://localhost:1055"
+    } if os.path.exists("/tmp/ts-run/tailscaled.sock") else None
+
+    try:
+        res = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=10)
+        return {"mode": "proxied" if proxies else "direct", "egress_ip": res.json().get("ip")}
+    except Exception as e:
+        return {"error": str(e)}
