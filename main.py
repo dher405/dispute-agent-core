@@ -16,7 +16,7 @@ os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-3.6-flash")
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 class SocialSignalIngest(BaseModel):
