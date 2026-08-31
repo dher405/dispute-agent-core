@@ -329,3 +329,95 @@ def get_claim_tracking_status(lead_id: str):
         if conn:
             conn.close()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/claims/submit")
+def submit_authorized_claim(req: dict):
+    lead_id = req.get("lead_id")
+    full_name = req.get("full_name")
+    signature = req.get("digital_signature")
+    email = req.get("email")
+    phone = req.get("phone")
+    address = req.get("address")
+    pnr = req.get("pnr")
+    flight_date = req.get("flight_date")
+
+    if not lead_id or not full_name or not signature:
+        raise HTTPException(status_code=400, detail="Missing required claim authorization fields")
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            UPDATE leads
+            SET status = 'opted_in',
+                claimant_name = %s,
+                claimant_email = %s,
+                claimant_phone = %s,
+                claimant_address = %s,
+                pnr = %s,
+                incident_date = %s,
+                digital_signature = %s,
+                updated_at = NOW()
+            WHERE lead_id = %s
+            RETURNING *
+            """,
+            (full_name, email, phone, address, pnr, flight_date, signature, lead_id)
+        )
+        updated_lead = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if not updated_lead:
+            raise HTTPException(status_code=404, detail="Lead ID not found in database")
+
+        # Auto-dispatch email package to carrier
+        claim_payload = {
+            "lead_id": lead_id,
+            "full_name": full_name,
+            "carrier_name": updated_lead.get("carrier_name", "Carrier"),
+            "incident_identifier": updated_lead.get("incident_identifier", "Flight"),
+            "governing_statute": updated_lead.get("regulatory_framework", "UK261 / EU261"),
+            "claimed_amount": float(updated_lead.get("estimated_compensation", 650.0)),
+            "passenger_address": address,
+            "booking_reference": pnr,
+            "incident_date": flight_date,
+            "incident_narrative": updated_lead.get("raw_post_text", ""),
+            "digital_signature": signature
+        }
+        
+        try:
+            from carrier_dispatcher import dispatch_demand_letter_email
+            import threading
+            threading.Thread(target=dispatch_demand_letter_email, args=(claim_payload,), daemon=True).start()
+        except Exception as e:
+            print(f"[DISPATCH ERROR] Could not trigger email dispatch: {e}", flush=True)
+
+        # Auto-dispatch SMS receipt via Twilio
+        if phone:
+            try:
+                from sms_dispatcher import send_claim_confirmation_sms
+                import threading
+                threading.Thread(
+                    target=send_claim_confirmation_sms,
+                    args=(phone, full_name, claim_payload["incident_identifier"], lead_id, claim_payload["claimed_amount"]),
+                    daemon=True
+                ).start()
+            except Exception as e:
+                print(f"[SMS ERROR] Could not trigger SMS dispatch: {e}", flush=True)
+
+        return {
+            "status": "success",
+            "message": "Claim authorized and demand letter queued",
+            "lead_id": lead_id,
+            "tracking_url": f"https://dispute-admin.onrender.com/?claim_id={lead_id}"
+        }
+    except Exception as e:
+        if conn:
+            conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
