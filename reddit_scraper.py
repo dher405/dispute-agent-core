@@ -9,11 +9,11 @@ TARGET_SUBREDDITS = ["unitedairlines", "delta", "americanairlines", "travel", "f
 KEYWORDS = ["delay", "delayed", "cancelled", "cancellation", "stuck", "hours late", "missed connection", "stranded"]
 
 HEADERS = {
-    "User-Agent": "DisputeClaimBot/1.0 (Air Passenger Rights Evaluator; contact: ops@disputeagent.local)"
+    "User-Agent": "DisputeClaimBot/1.2 (Air Passenger Rights Engine; contact: ops@disputeagent.local)"
 }
 
 def poll_reddit_rss():
-    print("[RSS SCANNER] Starting Reddit RSS feed listener...", flush=True)
+    print("[RSS SCANNER] Starting Reddit RSS listener with pacing...", flush=True)
     seen_entry_ids = set()
 
     while True:
@@ -62,15 +62,20 @@ def poll_reddit_rss():
                             except Exception as post_err:
                                 print(f"[API ERROR] Failed to send {payload['user_id']}: {post_err}", flush=True)
 
+                elif res.status_code == 429:
+                    print(f"[RSS r/{sub}] 429 Rate Limited. Sleeping 60s...", flush=True)
+                    time.sleep(60)
                 else:
                     print(f"[RSS r/{sub}] HTTP {res.status_code}", flush=True)
 
             except Exception as e:
                 print(f"[RSS r/{sub} ERROR] {e}", flush=True)
 
-            time.sleep(3)
+            # Pacing delay between subreddit requests
+            time.sleep(random.uniform(8, 14))
 
-        time.sleep(random.uniform(45, 60))
+        # Rest period between full passes
+        time.sleep(random.uniform(90, 120))
 
 if __name__ == "__main__":
     poll_reddit_rss()
