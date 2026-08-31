@@ -60,7 +60,7 @@ def get_lead_details(lead_id: str):
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE lead_id = %s;", (lead_id,))
+            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (lead_id,))
             lead = cur.fetchone()
             if not lead:
                 raise HTTPException(status_code=404, detail="Lead not found")
@@ -161,7 +161,7 @@ def register_customer_opt_in(payload: CustomerOptIn):
                     stripe_payment_method_id = %s,
                     consent_obtained = TRUE,
                     consent_timestamp = NOW()
-                WHERE lead_id = %s;
+                WHERE (id::text = %s);
             """, (payload.full_name, payload.email, payload.phone, customer_id, payload.stripe_payment_method_id, payload.lead_id))
 
             cur.execute("UPDATE leads SET status = 'opted_in' WHERE id = %s;", (payload.lead_id,))
@@ -175,7 +175,7 @@ def handle_customer_inbound_message(payload: InboundCustomerMessage):
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE lead_id = %s;", (payload.lead_id,))
+            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (payload.lead_id,))
             case_data = cur.fetchone()
 
         if not case_data:
@@ -198,7 +198,7 @@ def settle_contingency_commission(payload: SettlementTrigger):
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE lead_id = %s;", (payload.lead_id,))
+            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (payload.lead_id,))
             lead = cur.fetchone()
             if not lead:
                 raise HTTPException(status_code=404, detail="Lead not found.")
@@ -220,7 +220,7 @@ def settle_contingency_commission(payload: SettlementTrigger):
                 )
                 payment_intent_id = intent.id
 
-            cur.execute("UPDATE lead_contacts SET fee_charged_amount = %s, stripe_payment_intent_id = %s WHERE lead_id = %s;", (charge_amount, payment_intent_id, payload.lead_id))
+            cur.execute("UPDATE lead_contacts SET fee_charged_amount = %s, stripe_payment_intent_id = %s WHERE (id::text = %s);", (charge_amount, payment_intent_id, payload.lead_id))
             cur.execute("UPDATE leads SET status = 'won' WHERE id = %s;", (payload.lead_id,))
             conn.commit()
 
@@ -253,7 +253,7 @@ def download_demand_letter(lead_id: str):
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE lead_id = %s;", (lead_id,))
+            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (lead_id,))
             claim = cur.fetchone()
             if not claim:
                 raise HTTPException(status_code=404, detail="Claim not found")
@@ -304,7 +304,7 @@ def get_claim_tracking_status(lead_id: str):
                    incident_identifier, estimated_compensation, regulatory_framework,
                    claimant_name, updated_at, created_at
             FROM leads
-            WHERE lead_id = %s
+            WHERE (id::text = %s)
             """,
             (lead_id,)
         )
@@ -363,7 +363,7 @@ def submit_authorized_claim(req: dict):
                 incident_date = %s,
                 digital_signature = %s,
                 updated_at = NOW()
-            WHERE lead_id = %s
+            WHERE (id::text = %s)
             RETURNING *
             """,
             (full_name, email, phone, address, pnr, flight_date, signature, lead_id)
