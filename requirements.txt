@@ -15,3 +15,4 @@ reportlab>=4.1.0
 praw>=7.7.1
 PySocks>=1.7.1
 resend>=2.1.0
+twilio>=9.0.0
