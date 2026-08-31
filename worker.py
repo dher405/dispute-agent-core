@@ -1,5 +1,6 @@
 import os
 import time
+import sys
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from db import get_db_connection
@@ -13,15 +14,16 @@ def dispatch_approved_outreach():
                 FROM leads l
                 JOIN dispute_evaluations de ON l.id = de.lead_id
                 WHERE l.status = 'approved';
-            """ )
+            """)
             approved_leads = cur.fetchall()
 
             for lead in approved_leads:
-                api_host = os.getenv("API_PUBLIC_URL", "http://localhost:8000")
+                api_host = os.getenv("API_PUBLIC_URL", "https://dispute-api-xyl7.onrender.com")
                 claim_portal_url = f"{api_host}/claim?lead_id={lead['id']}"
                 full_message = f"{lead['outreach_copy_draft']} File and claim here: {claim_portal_url}"
 
-                print(f"[AUTO-DISPATCH] Sending to @{lead['platform_username']} on {lead['source_platform']}: {full_message}")
+                # Flush stdout explicitly
+                print(f"[AUTO-DISPATCH] Sending to @{lead['platform_username']} on {lead['source_platform']}: {full_message}", flush=True)
 
                 cur.execute("UPDATE leads SET status = 'contacted' WHERE id = %s;", (lead['id'],))
                 conn.commit()
@@ -29,10 +31,10 @@ def dispatch_approved_outreach():
         conn.close()
 
 if __name__ == "__main__":
-    print("Background worker loop started...")
+    print("Background worker loop started...", flush=True)
     while True:
         try:
             dispatch_approved_outreach()
         except Exception as e:
-            print(f"Worker iteration notice: {e}")
+            print(f"Worker iteration notice: {e}", flush=True)
         time.sleep(60)
