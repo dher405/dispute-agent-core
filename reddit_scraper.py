@@ -1,14 +1,16 @@
 import os
 import time
+import random
 import requests
 
 API_URL = os.getenv("API_PUBLIC_URL", "https://dispute-api-xyl7.onrender.com") + "/api/v1/leads/evaluate"
 TARGET_SUBREDDITS = ["unitedairlines", "delta", "americanairlines", "travel", "flights"]
 KEYWORDS = ["delay", "delayed", "cancelled", "cancellation", "stuck", "hours late", "missed connection", "stranded"]
 
+# API-compliant User-Agent bypasses CDN browser-cookie challenges
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "User-Agent": "python:dispute-agent-scanner:v1.1 (contact: admin@disputeagent.local)",
+    "Accept": "application/json"
 }
 
 def get_proxies():
@@ -20,15 +22,21 @@ def get_proxies():
     return None
 
 def poll_reddit_public_feed():
-    print("[FEED LISTENER] Background thread running. Starting poll cycle...", flush=True)
+    print("[FEED LISTENER] Poller started with Session persistence and jitter...", flush=True)
     seen_post_ids = set()
+    
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
     while True:
         proxies = get_proxies()
+        if proxies:
+            session.proxies.update(proxies)
+
         for sub in TARGET_SUBREDDITS:
             url = f"https://www.reddit.com/r/{sub}/new.json?limit=10"
             try:
-                res = requests.get(url, headers=HEADERS, proxies=proxies, timeout=10)
+                res = session.get(url, timeout=10)
                 if res.status_code == 200:
                     data = res.json()
                     posts = data.get("data", {}).get("children", [])
@@ -61,17 +69,17 @@ def poll_reddit_public_feed():
                                 print(f"[API ERROR] Failed to send {post_id}: {post_err}", flush=True)
 
                 elif res.status_code == 429:
-                    print(f"[FEED r/{sub}] 429 Rate Limited. Sleeping 30s...", flush=True)
-                    time.sleep(30)
+                    print(f"[FEED r/{sub}] 429 Rate Limited. Sleeping 60s...", flush=True)
+                    time.sleep(60)
                 else:
-                    print(f"[FEED r/{sub}] HTTP {res.status_code}", flush=True)
+                    print(f"[FEED r/{sub}] HTTP {res.status_code} - CDN block.", flush=True)
 
             except Exception as e:
                 print(f"[FEED r/{sub} ERROR] {e}", flush=True)
 
-            time.sleep(3)  # Short delay between subreddit requests
+            time.sleep(random.uniform(3, 7))
 
-        time.sleep(45)  # Rest interval between full cycles
+        time.sleep(random.uniform(45, 60))
 
 if __name__ == "__main__":
     poll_reddit_public_feed()
