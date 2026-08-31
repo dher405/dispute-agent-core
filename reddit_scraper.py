@@ -12,15 +12,20 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+PROXIES = {
+    "http": "socks5h://127.0.0.1:1055",
+    "https": "socks5h://127.0.0.1:1055"
+} if os.path.exists("/tmp/ts-run/tailscaled.sock") else None
+
 def poll_reddit_public_feed():
     url = f"https://www.reddit.com/r/{TARGET_SUBREDDITS}/new.json?limit=25"
     seen_post_ids = set()
 
-    print(f"[FEED LISTENER] Polling public feed for r/{TARGET_SUBREDDITS}...", flush=True)
+    print(f"[FEED LISTENER] Polling public feed for r/{TARGET_SUBREDDITS} via residential proxy...", flush=True)
 
     while True:
         try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
+            res = requests.get(url, headers=HEADERS, proxies=PROXIES, timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 posts = data.get("data", {}).get("children", [])
@@ -56,12 +61,12 @@ def poll_reddit_public_feed():
                 print("[FEED LISTENER] Rate limited. Backing off for 60s...", flush=True)
                 time.sleep(60)
             else:
-                print(f"[FEED LISTENER] HTTP status: {res.status_code}", flush=True)
+                print(f"[FEED LISTENER] HTTP status: {res.status_code} - {res.text[:100]}", flush=True)
 
         except Exception as e:
             print(f"[FEED ERROR] Request failed: {e}", flush=True)
 
-        time.sleep(60)
+        time.sleep(45)
 
 if __name__ == "__main__":
     poll_reddit_public_feed()
