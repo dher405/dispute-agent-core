@@ -1,11 +1,20 @@
+import streamlit as st
+import requests
+import os
 
 query_params = st.query_params
-if "claim_id" in query_params or query_params.get("view") == ["track"]:
-    render_claim_tracking_page(query_params.get("claim_id", ""))
-    st.stop()
+if "claim_id" in query_params:
+    claim_val = query_params.get("claim_id", "")
+    if isinstance(claim_val, list):
+        claim_val = claim_val[0] if claim_val else ""
+    if "render_claim_tracking_page" in globals():
+        render_claim_tracking_page(claim_val)
+        st.stop()
+
+
+
 
 import os
-import streamlit as st
 import db
 
 st.set_page_config(page_title="Autonomous Dispute Admin Desk", layout="wide")
@@ -81,7 +90,6 @@ else:
                 st.rerun()
 
 
-import streamlit as st
 import requests
 import os
 
