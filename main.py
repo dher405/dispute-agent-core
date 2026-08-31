@@ -265,3 +265,12 @@ def download_demand_letter(lead_id: str):
         )
     finally:
         conn.close()
+
+from reddit_scraper import poll_reddit_public_feed
+
+@app.on_event("startup")
+async def start_reddit_poller():
+    import threading
+    t = threading.Thread(target=poll_reddit_public_feed, daemon=True)
+    t.start()
+    print("[POLISHER] Background Reddit poller thread started.", flush=True)
