@@ -1,3 +1,4 @@
+import requests
 from fastapi import Response
 from letter_generator import generate_demand_pdf
 import os
