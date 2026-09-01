@@ -12,7 +12,11 @@ from psycopg2.extras import RealDictCursor
 from google import genai
 from google.genai import types
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+from sms_dispatcher import notify_claim_event
+from carrier_dispatcher import dispatch_demand_email
+from letter_generator import StatutoryDemandGenerator
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s")
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -20,8 +24,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 app = FastAPI(
     title="Dispute Agent Core Engine",
-    description="Multi-vertical statutory dispute evaluation, carrier webhook reconciliation, and claim orchestration.",
-    version="2.0.0"
+    description="Multi-vertical statutory dispute evaluation, carrier webhook reconciliation, and automated dispatch gateway.",
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -75,6 +79,72 @@ class SettlementPayload(BaseModel):
     lead_id: str
     recovery_amount: Decimal = Field(..., example=600.00)
 
+# --- Background Task Routines ---
+
+def trigger_carrier_demand_pipeline(lead_id: str):
+    """Generates PDF demand letter and emails respondent legal desk."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    id::text AS id,
+                    vertical,
+                    carrier_name,
+                    incident_identifier,
+                    account_number,
+                    outage_duration_hours,
+                    tier_speed_tier,
+                    estimated_compensation,
+                    recovery_amount,
+                    regulatory_framework,
+                    ai_reasoning,
+                    status,
+                    claimant_name,
+                    claimant_email,
+                    claimant_phone,
+                    claimant_address,
+                    pnr,
+                    incident_date,
+                    digital_signature
+                FROM leads
+                WHERE id::text = %s;
+            """, (lead_id,))
+            lead = cur.fetchone()
+
+            if not lead:
+                logger.error(f"[TASK-ERROR] Lead {lead_id} not found for PDF dispatch.")
+                return
+
+            pdf_bytes = StatutoryDemandGenerator.generate_pdf(lead)
+            success, note = dispatch_demand_email(lead, pdf_bytes)
+
+            if success:
+                cur.execute("""
+                    UPDATE leads 
+                    SET status = 'dispatched', updated_at = NOW() 
+                    WHERE id::text = %s;
+                """, (lead_id,))
+                
+                cur.execute("""
+                    INSERT INTO carrier_inbound_events (
+                        lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """, (
+                    lead_id,
+                    lead.get("carrier_name") or "Unknown Carrier",
+                    lead.get("vertical") or "flight_disruption",
+                    "demand_dispatched",
+                    0.00,
+                    f"PDF demand served to legal desk. Note: {note}",
+                    psycopg2.extras.Json({"dispatch_method": "smtp", "note": note})
+                ))
+                conn.commit()
+                logger.info(f"[TASK-SUCCESS] Demand dispatched and logged for Lead {lead_id}")
+        conn.close()
+    except Exception as e:
+        logger.error(f"[TASK-EXCEPTION] Error during demand dispatch for {lead_id}: {e}")
+
 # --- AI Evaluation Gateway ---
 
 def evaluate_multi_vertical_signal(text: str) -> Dict[str, Any]:
@@ -125,7 +195,7 @@ Return JSON matching this exact structure:
         )
         return json.loads(fallback.text)
 
-# --- Endpoints ---
+# --- Routes ---
 
 @app.get("/health", status_code=status.HTTP_200_OK)
 def health_check():
@@ -236,7 +306,8 @@ def get_claim_tracking(lead_id: str, conn=Depends(get_db)):
     return claim
 
 @app.post("/api/v1/claims/submit")
-def submit_claim(payload: ClaimSubmissionPayload, conn=Depends(get_db)):
+def submit_claim(payload: ClaimSubmissionPayload, background_tasks: BackgroundTasks, conn=Depends(get_db)):
+    """Receives claimant digital opt-in, schedules carrier demand dispatch, and sends SMS confirmation."""
     query = """
     UPDATE leads
     SET claimant_name = %s,
@@ -250,7 +321,7 @@ def submit_claim(payload: ClaimSubmissionPayload, conn=Depends(get_db)):
         status = 'opted_in',
         updated_at = NOW()
     WHERE id::text = %s
-    RETURNING id::text, status, claimant_name, claimant_email;
+    RETURNING id::text, status, claimant_name, claimant_email, claimant_phone;
     """
     with conn.cursor() as cur:
         cur.execute(query, (
@@ -269,10 +340,23 @@ def submit_claim(payload: ClaimSubmissionPayload, conn=Depends(get_db)):
 
     if not updated:
         raise HTTPException(status_code=404, detail="Lead ID not found.")
-    return {"status": "opted_in", "claim": updated}
+
+    # 1. Asynchronously send SMS confirmation to claimant
+    if payload.claimant_phone:
+        background_tasks.add_task(notify_claim_event, payload.lead_id, "opt_in_confirmation")
+
+    # 2. Asynchronously compile PDF demand package and email carrier legal desk
+    background_tasks.add_task(trigger_carrier_demand_pipeline, payload.lead_id)
+
+    return {
+        "status": "opted_in",
+        "claim": updated,
+        "actions_dispatched": ["sms_opt_in_confirmation", "carrier_demand_dispatch"]
+    }
 
 @app.post("/api/v1/claims/settle")
-def settle_claim(payload: SettlementPayload, conn=Depends(get_db)):
+def settle_claim(payload: SettlementPayload, background_tasks: BackgroundTasks, conn=Depends(get_db)):
+    """Logs formal settlement, calculates 25% contingency fee, and dispatches SMS settlement alert."""
     fee = (payload.recovery_amount * Decimal("0.25")).quantize(Decimal("0.01"))
     query = """
     UPDATE leads
@@ -281,7 +365,7 @@ def settle_claim(payload: SettlementPayload, conn=Depends(get_db)):
         fee_collected = %s,
         updated_at = NOW()
     WHERE id::text = %s
-    RETURNING id::text, status, recovery_amount, fee_collected;
+    RETURNING id::text, status, recovery_amount, fee_collected, claimant_phone;
     """
     with conn.cursor() as cur:
         cur.execute(query, (payload.recovery_amount, fee, payload.lead_id))
@@ -290,10 +374,19 @@ def settle_claim(payload: SettlementPayload, conn=Depends(get_db)):
 
     if not settled:
         raise HTTPException(status_code=404, detail="Lead ID not found.")
-    return {"status": "settled", "claim": settled}
+
+    # Asynchronously dispatch SMS settlement accounting notification
+    background_tasks.add_task(notify_claim_event, payload.lead_id, "settlement_alert")
+
+    return {
+        "status": "settled",
+        "claim": settled,
+        "actions_dispatched": ["sms_settlement_alert"]
+    }
 
 @app.post("/api/v1/webhooks/carrier/inbound", status_code=status.HTTP_200_OK)
-def inbound_carrier_response(payload: CarrierWebhookPayload, conn=Depends(get_db)):
+def inbound_carrier_response(payload: CarrierWebhookPayload, background_tasks: BackgroundTasks, conn=Depends(get_db)):
+    """Receives carrier webhook decisions, logs telemetry, recalculates fees, and triggers settlement SMS."""
     matched_lead_id = None
     
     with conn.cursor() as cur:
@@ -340,6 +433,10 @@ def inbound_carrier_response(payload: CarrierWebhookPayload, conn=Depends(get_db
                 WHERE id::text = %s;
                 """
                 cur.execute(update_query, (recovery, contingency_fee, matched_lead_id))
+                
+                # Dispatch settlement alert SMS via background worker
+                background_tasks.add_task(notify_claim_event, matched_lead_id, "settlement_alert")
+
             elif payload.decision == "rejected":
                 cur.execute(
                     "UPDATE leads SET status = 'rejected', updated_at = NOW() WHERE id::text = %s;",
