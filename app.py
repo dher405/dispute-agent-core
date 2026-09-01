@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="Dispute Agent | Claims & Operations Desk",
+    page_title="Dispute Agent | Operations & Claims Desk",
     page_icon="⚖️",
     layout="wide"
 )
@@ -31,7 +31,6 @@ def ensure_database_schema():
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            # 1. Ensure leads table has all operational columns
             cur.execute("""
                 ALTER TABLE leads
                 ADD COLUMN IF NOT EXISTS vertical VARCHAR(50) DEFAULT 'flight_disruption',
@@ -43,8 +42,6 @@ def ensure_database_schema():
                 ADD COLUMN IF NOT EXISTS last_dispatch_attempt_at TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS next_dispatch_retry_at TIMESTAMPTZ DEFAULT NOW();
             """)
-            
-            # 2. Ensure admin_users exists and has master account
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS admin_users (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -283,76 +280,168 @@ if user_role == "super_admin":
 
 tabs = st.tabs(tab_titles)
 
+# --- TAB 0: INGESTION QUEUE (RESTORED SELECTION & APPROVAL CONTROLS) ---
 with tabs[0]:
     st.subheader("Staged Consumer Signals")
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM v_staged_leads_for_review LIMIT 50;")
-        leads = cur.fetchall()
-    conn.close()
-    if leads:
-        df = pd.DataFrame(leads)
-        st.dataframe(df[["id", "vertical", "carrier_name", "estimated_compensation", "regulatory_framework", "created_at"]])
-    else:
-        st.info("No leads pending review.")
+    vertical_filter = st.selectbox(
+        "Filter by Vertical",
+        ["All Verticals", "flight_disruption", "isp_outage", "security_deposit", "class_action"]
+    )
+    
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            query = "SELECT * FROM v_staged_leads_for_review"
+            params = []
+            if vertical_filter != "All Verticals":
+                query += " WHERE vertical = %s"
+                params.append(vertical_filter)
+            query += " LIMIT 50;"
+            cur.execute(query, tuple(params))
+            leads = cur.fetchall()
+        conn.close()
 
+        if leads:
+            df = pd.DataFrame(leads)
+            st.dataframe(df[["id", "vertical", "carrier_name", "estimated_compensation", "regulatory_framework", "created_at"]])
+            
+            st.divider()
+            st.subheader("Action Selected Dispute Lead")
+            
+            lead_options = [l["id"] for l in leads]
+            selected_lead_id = st.selectbox("Inspect Lead ID", lead_options, key="sel_review_lead")
+            selected_lead = next(l for l in leads if l["id"] == selected_lead_id)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"**Platform / User:** `{selected_lead.get('source_platform')}` / `{selected_lead.get('username')}`")
+                st.markdown(f"**Respondent Entity:** `{selected_lead.get('carrier_name') or 'N/A'}`")
+                st.markdown(f"**Statutory Basis:** `{selected_lead.get('regulatory_framework') or 'Consumer Protection Laws'}`")
+                st.markdown(f"**Estimated Valuation:** **${float(selected_lead.get('estimated_compensation') or 0):.2f}**")
+                st.info(f"**AI Reasoning & Disruption Breakdown:**\n{selected_lead.get('ai_reasoning') or 'Disruption confirmed by operational rules.'}")
+
+            with col_b:
+                claim_auth_link = f"https://dispute-admin.onrender.com/?claim_id={selected_lead_id}"
+                default_copy = selected_lead.get("outreach_copy") or ""
+                
+                # Ensure the outreach text includes the claimant link
+                if claim_auth_link not in default_copy:
+                    full_outreach_proposal = f"{default_copy} Authorize representation and claim your restitution here: {claim_auth_link}".strip()
+                else:
+                    full_outreach_proposal = default_copy
+
+                outreach_text = st.text_area(
+                    "Consumer Outreach Message (Sends to social platform / claimant)",
+                    value=full_outreach_proposal,
+                    height=130
+                )
+                
+                col_btn1, col_btn2 = st.columns(2)
+                
+                if col_btn1.button("✅ Approve & Stage Outreach", key=f"app_{selected_lead_id}"):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE leads 
+                            SET status = 'approved', outreach_copy = %s, updated_at = NOW() 
+                            WHERE id::text = %s;
+                        """, (outreach_text, selected_lead_id))
+                    conn.close()
+                    st.success("Lead approved and queued for outreach.")
+                    st.rerun()
+
+                if col_btn2.button("❌ Dismiss / Reject", key=f"rej_{selected_lead_id}"):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE leads SET status = 'rejected', updated_at = NOW() WHERE id::text = %s;", (selected_lead_id,))
+                    conn.close()
+                    st.warning("Lead dismissed and marked as rejected.")
+                    st.rerun()
+        else:
+            st.info("No leads currently pending review in this vertical.")
+    except Exception as e:
+        st.error(f"Error loading review queue: {e}")
+
+# --- TAB 1: ACTIVE CLAIMS ---
 with tabs[1]:
     st.subheader("Active & Settled Claims Ledger")
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("SELECT id::text AS id, vertical, carrier_name, claimant_name, recovery_amount, fee_collected, status FROM leads WHERE status IN ('opted_in', 'dispatched', 'settled') ORDER BY updated_at DESC LIMIT 100;")
-        claims_list = cur.fetchall()
-    conn.close()
-    if claims_list:
-        st.dataframe(pd.DataFrame(claims_list))
-    else:
-        st.info("No active claims.")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id::text AS id, vertical, carrier_name, claimant_name, recovery_amount, fee_collected, status 
+                FROM leads WHERE status IN ('opted_in', 'dispatched', 'settled') ORDER BY updated_at DESC LIMIT 100;
+            """)
+            claims_list = cur.fetchall()
+        conn.close()
+        if claims_list:
+            df_claims = pd.DataFrame(claims_list)
+            m1, m2, m3 = st.columns(3)
+            tot_rec = df_claims["recovery_amount"].astype(float).sum()
+            tot_fee = df_claims["fee_collected"].astype(float).sum()
+            m1.metric("Active Claims", len(df_claims))
+            m2.metric("Total Recovered", f"${tot_rec:.2f}")
+            m3.metric("Platform Fees (25%)", f"${tot_fee:.2f}")
+            st.dataframe(df_claims)
+        else:
+            st.info("No active claims.")
+    except Exception as e:
+        st.error(f"Error: {e}")
 
+# --- TAB 2: WEBHOOK AUDIT ---
 with tabs[2]:
     st.subheader("Inbound Carrier Telemetry Events")
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("SELECT id::text, carrier_name, vertical, event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 50;")
-        events = cur.fetchall()
-    conn.close()
-    if events:
-        st.dataframe(pd.DataFrame(events))
-    else:
-        st.info("No webhook events logged.")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text, carrier_name, vertical, event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 50;")
+            events = cur.fetchall()
+        conn.close()
+        if events:
+            st.dataframe(pd.DataFrame(events))
+        else:
+            st.info("No webhook events logged.")
+    except Exception as e:
+        st.error(f"Error: {e}")
 
+# --- TAB 3: DLQ ---
 with tabs[3]:
     st.subheader("⚠️ Dead-Letter Queue (DLQ)")
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT id::text AS id, carrier_name, claimant_name, 
-                   COALESCE(dispatch_attempts, 0) AS dispatch_attempts, 
-                   last_dispatch_error, status 
-            FROM leads 
-            WHERE status='dispatch_failed' OR last_dispatch_error IS NOT NULL;
-        """)
-        dlq = cur.fetchall()
-    conn.close()
-    if dlq:
-        st.dataframe(pd.DataFrame(dlq))
-        if user_role in ("super_admin", "claims_manager"):
-            sel_dlq = st.selectbox("Select Stalled Claim to Re-Queue", [d["id"] for d in dlq])
-            if st.button("🔄 Force Immediate Re-Dispatch", key=f"dlq_retry_{sel_dlq}"):
-                conn = get_db()
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE leads 
-                        SET status='opted_in', dispatch_attempts=0, 
-                            last_dispatch_error=NULL, next_dispatch_retry_at=NOW(), 
-                            updated_at=NOW() 
-                        WHERE id::text=%s;
-                    """, (sel_dlq,))
-                conn.close()
-                st.success("Claim requeued for carrier dispatch.")
-                st.rerun()
-    else:
-        st.success("✅ Dead-Letter Queue is clear.")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id::text AS id, carrier_name, claimant_name, 
+                       COALESCE(dispatch_attempts, 0) AS dispatch_attempts, 
+                       last_dispatch_error, status 
+                FROM leads 
+                WHERE status='dispatch_failed' OR last_dispatch_error IS NOT NULL;
+            """)
+            dlq = cur.fetchall()
+        conn.close()
+        if dlq:
+            st.dataframe(pd.DataFrame(dlq))
+            if user_role in ("super_admin", "claims_manager"):
+                sel_dlq = st.selectbox("Select Stalled Claim to Re-Queue", [d["id"] for d in dlq])
+                if st.button("🔄 Force Immediate Re-Dispatch", key=f"dlq_retry_{sel_dlq}"):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE leads 
+                            SET status='opted_in', dispatch_attempts=0, 
+                                last_dispatch_error=NULL, next_dispatch_retry_at=NOW(), 
+                                updated_at=NOW() 
+                            WHERE id::text=%s;
+                        """, (sel_dlq,))
+                    conn.close()
+                    st.success("Claim requeued for carrier dispatch.")
+                    st.rerun()
+        else:
+            st.success("✅ Dead-Letter Queue is clear.")
+    except Exception as e:
+        st.error(f"Error: {e}")
 
+# --- TAB 4: OPERATIONS MANUAL ---
 with tabs[4]:
     st.header("📖 Dispute Agent Platform: Field Manual & RBAC Guide")
     with st.expander("1. System Purpose & Plain-English Overview", expanded=True):
@@ -376,6 +465,7 @@ with tabs[4]:
         * `auditor`: Read-only access to portfolio ledgers and webhook telemetry.
         """)
 
+# --- TAB 5: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
 if user_role == "super_admin" and len(tabs) > 5:
     with tabs[5]:
         st.subheader("👥 User Management & Role Provisioning")
