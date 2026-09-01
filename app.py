@@ -4,6 +4,9 @@ import requests
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+
+load_dotenv()
 
 st.set_page_config(
     page_title="Dispute Agent | Operations & Claims Desk",
@@ -63,7 +66,7 @@ if claim_id_param:
                 fee = float(claim.get("fee_collected") or 0)
                 client_net = payout - fee
                 st.success(f"🎉 **Dispute Resolved!** Net disbursement: **${client_net:.2f}** (after statutory contingency fee: ${fee:.2f}).")
-            elif status == "staged_for_review":
+            elif status in ("staged_for_review", "approved"):
                 st.warning("Action Required: Please complete authorization to proceed with formal recovery.")
         else:
             st.error("Dispute record not found. Please verify your claim reference URL.")
@@ -78,10 +81,11 @@ if claim_id_param:
 st.title("⚖️ Dispute Agent: Multi-Vertical Operations Desk")
 st.caption("Autonomous Statutory Enforcement Engine & Carrier Settlement Gateway")
 
-tab_review, tab_active, tab_webhooks = st.tabs([
+tab_review, tab_active, tab_webhooks, tab_dlq = st.tabs([
     "📥 Ingestion & Review Queue",
     "💼 Active & Settled Claims",
-    "📡 Inbound Carrier Webhooks"
+    "📡 Inbound Carrier Webhooks",
+    "⚠️ Dead-Letter Queue (DLQ)"
 ])
 
 # --- TAB 1: REVIEW QUEUE ---
@@ -133,7 +137,7 @@ with tab_review:
                 if col_btn1.button("✅ Approve & Stage Outreach", key=f"app_{selected_id}"):
                     conn = get_db()
                     with conn.cursor() as cur:
-                        cur.execute("UPDATE leads SET status = 'approved', outreach_copy = %s WHERE id::text = %s", (outreach_text, selected_id))
+                        cur.execute("UPDATE leads SET status = 'approved', outreach_copy = %s, updated_at = NOW() WHERE id::text = %s", (outreach_text, selected_id))
                         conn.commit()
                     conn.close()
                     st.success("Lead marked as Approved.")
@@ -142,7 +146,7 @@ with tab_review:
                 if col_btn2.button("❌ Dismiss / Reject", key=f"rej_{selected_id}"):
                     conn = get_db()
                     with conn.cursor() as cur:
-                        cur.execute("UPDATE leads SET status = 'rejected' WHERE id::text = %s", (selected_id,))
+                        cur.execute("UPDATE leads SET status = 'rejected', updated_at = NOW() WHERE id::text = %s", (selected_id,))
                         conn.commit()
                     conn.close()
                     st.warning("Lead dismissed.")
@@ -181,7 +185,6 @@ with tab_active:
         if claims:
             df_claims = pd.DataFrame(claims)
             
-            # Metrics
             total_recovered = df_claims["recovery_amount"].astype(float).sum()
             total_fees = df_claims["fee_collected"].astype(float).sum()
             
@@ -226,3 +229,122 @@ with tab_webhooks:
             st.info("No inbound carrier events recorded.")
     except Exception as e:
         st.error(f"Error fetching inbound webhook logs: {e}")
+
+# --- TAB 4: DEAD-LETTER QUEUE (DLQ) & FAILED DISPATCHES ---
+with tab_dlq:
+    st.subheader("⚠️ Dead-Letter Queue & Failed Carrier Dispatches")
+    st.caption("Claims stalled during email/PDF generation or where transmission retry thresholds were exceeded.")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    id::text AS id,
+                    vertical,
+                    carrier_name,
+                    claimant_name,
+                    claimant_email,
+                    claimant_phone,
+                    incident_identifier,
+                    account_number,
+                    estimated_compensation,
+                    status,
+                    COALESCE(dispatch_attempts, 0) AS dispatch_attempts,
+                    last_dispatch_error,
+                    last_dispatch_attempt_at,
+                    next_dispatch_retry_at,
+                    created_at
+                FROM leads
+                WHERE status = 'dispatch_failed' 
+                   OR (status = 'opted_in' AND dispatch_attempts > 0)
+                   OR last_dispatch_error IS NOT NULL
+                ORDER BY last_dispatch_attempt_at DESC NULLS LAST;
+            """)
+            dlq_leads = cur.fetchall()
+        conn.close()
+
+        if dlq_leads:
+            df_dlq = pd.DataFrame(dlq_leads)
+            
+            col_m1, col_m2 = st.columns(2)
+            col_m1.metric("Failed / Stalled Transmissions", len(df_dlq))
+            exhausted_count = len(df_dlq[df_dlq["status"] == "dispatch_failed"])
+            col_m2.metric("Permanently Exhausted (DLQ)", exhausted_count)
+
+            st.dataframe(
+                df_dlq[["id", "vertical", "carrier_name", "claimant_name", "dispatch_attempts", "status", "last_dispatch_error", "last_dispatch_attempt_at"]],
+                use_container_width=True
+            )
+
+            st.divider()
+            st.subheader("Manual DLQ Inspection & Recovery Action")
+            dlq_ids = [item["id"] for item in dlq_leads]
+            selected_dlq_id = st.selectbox("Select Failed Claim to Remediate", dlq_ids, key="select_dlq_claim")
+            selected_dlq_lead = next(item for item in dlq_leads if item["id"] == selected_dlq_id)
+
+            col_dlq_info, col_dlq_action = st.columns(2)
+
+            with col_dlq_info:
+                st.markdown(f"**Claimant:** {selected_dlq_lead['claimant_name']} (`{selected_dlq_lead['claimant_email']}`)")
+                st.markdown(f"**Carrier / Entity:** `{selected_dlq_lead['carrier_name']}`")
+                st.markdown(f"**Incident / Account:** `{selected_dlq_lead['incident_identifier'] or selected_dlq_lead['account_number'] or 'N/A'}`")
+                st.markdown(f"**Current Pipeline Status:** `{selected_dlq_lead['status']}`")
+                st.markdown(f"**Total Dispatch Attempts:** `{selected_dlq_lead['dispatch_attempts']}`")
+                st.error(f"**Last Recorded Error:**\n{selected_dlq_lead['last_dispatch_error'] or 'Unknown transmission error'}")
+
+            with col_dlq_action:
+                updated_carrier = st.text_input("Override Target Carrier Name", value=selected_dlq_lead["carrier_name"] or "")
+                
+                col_btn_retry, col_btn_reset, col_btn_dismiss = st.columns(3)
+
+                if col_btn_retry.button("🔄 Force Immediate Retry", key=f"retry_{selected_dlq_id}"):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE leads
+                            SET status = 'opted_in',
+                                carrier_name = %s,
+                                next_dispatch_retry_at = NOW(),
+                                updated_at = NOW()
+                            WHERE id::text = %s;
+                        """, (updated_carrier, selected_dlq_id))
+                        conn.commit()
+                    conn.close()
+                    st.success("Claim reset to 'opted_in' for immediate background processing.")
+                    st.rerun()
+
+                if col_btn_reset.button("🧹 Reset Attempt Counter", key=f"reset_{selected_dlq_id}"):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE leads
+                            SET dispatch_attempts = 0,
+                                last_dispatch_error = NULL,
+                                status = 'opted_in',
+                                next_dispatch_retry_at = NOW(),
+                                updated_at = NOW()
+                            WHERE id::text = %s;
+                        """, (selected_dlq_id,))
+                        conn.commit()
+                    conn.close()
+                    st.info("Attempt counter cleared. Queued for standard dispatch.")
+                    st.rerun()
+
+                if col_btn_dismiss.button("🚫 Dismiss Claim", key=f"dismiss_{selected_dlq_id}"):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE leads
+                            SET status = 'rejected',
+                                updated_at = NOW()
+                            WHERE id::text = %s;
+                        """, (selected_dlq_id,))
+                        conn.commit()
+                    conn.close()
+                    st.warning("Claim permanently dismissed.")
+                    st.rerun()
+        else:
+            st.success("✅ Dead-Letter Queue is clear. All carrier demand transmissions are healthy.")
+    except Exception as e:
+        st.error(f"Error accessing DLQ records: {e}")
