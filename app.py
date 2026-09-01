@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="Dispute Agent | Operations & Claims Desk",
+    page_title="Dispute Agent | Claims & Recovery Portal",
     page_icon="⚖️",
     layout="wide"
 )
@@ -26,7 +26,6 @@ def get_db():
     conn.autocommit = True
     return conn
 
-# Auto-heal: Ensure admin_users table exists whenever Streamlit starts
 def ensure_auth_schema():
     try:
         conn = get_db()
@@ -60,62 +59,135 @@ def ensure_auth_schema():
 
 ensure_auth_schema()
 
-# =========================================================
-# PUBLIC CLAIMANT TRACKING VIEW (?claim_id=<UUID>)
-# =========================================================
+# =====================================================================
+# PUBLIC CLAIMANT INTAKE & TRACKING PORTAL (?claim_id=<UUID>)
+# =====================================================================
 query_params = st.query_params
 claim_id_param = query_params.get("claim_id")
 
 if claim_id_param:
-    st.title("🛡️ Dispute Claim Resolution Portal")
-    st.caption(f"Tracking Case Reference: `{claim_id_param}`")
+    st.title("🛡️ Statutory Dispute Recovery Portal")
+    st.caption(f"Secure Case Reference: `{claim_id_param}`")
 
     try:
         res = requests.get(f"{API_BASE}/api/v1/claims/track/{claim_id_param}", timeout=10)
         if res.status_code == 200:
             claim = res.json()
+            status = claim.get("status", "staged_for_review")
+            vertical = claim.get("vertical", "flight_disruption")
+            carrier = claim.get("carrier_name") or "Service Provider"
+            est_comp = float(claim.get("estimated_compensation") or 0.0)
+
+            # TOP METRICS BANNER
             st.divider()
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Vertical", (claim.get("vertical") or "Dispute").replace("_", " ").title())
-            col2.metric("Target Entity", claim.get("carrier_name") or "Entity")
-            col3.metric("Current Status", (claim.get("status") or "Pending").upper())
-            
-            payout = float(claim.get("recovery_amount") or claim.get("estimated_compensation") or 0)
-            col4.metric("Settlement Amount", f"${payout:.2f}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Dispute Vertical", vertical.replace("_", " ").title())
+            c2.metric("Target Entity", carrier)
+            c3.metric("Statutory Valuation", f"${est_comp:.2f}")
+            c4.metric("Current Status", status.replace("_", " ").upper())
 
-            st.subheader("Statutory Legal Framework")
-            st.info(claim.get("regulatory_framework") or "Statutory consumer protection laws apply.")
+            # SCENARIO A: PENDING CONSUMER AUTHORIZATION
+            if status in ("staged_for_review", "approved", "contacted"):
+                st.subheader("📋 Complete Your Representation Authorization")
+                st.info(
+                    f"**Statutory Basis:** {claim.get('regulatory_framework', 'Consumer Protection Mandates')}\n\n"
+                    "Dispute Agent operates on a **100% No-Win, No-Fee contingency basis**. "
+                    "There are **$0 upfront fees**. If we recover compensation on your behalf, our standard platform contingency fee is **25%** of the settled amount."
+                )
 
-            status = claim.get("status")
-            st.subheader("Dispute Timeline")
-            steps = ["Staged", "Opted In", "Demand Dispatched", "Settled"]
-            step_idx = 0
-            if status == "opted_in":
-                step_idx = 1
-            elif status == "dispatched":
-                step_idx = 2
-            elif status == "settled":
-                step_idx = 3
+                with st.form("form_claimant_optin"):
+                    st.markdown("#### 1. Claimant Identification & Contact")
+                    col_u1, col_u2 = st.columns(2)
+                    with col_u1:
+                        c_name = st.text_input("Full Legal Name *", placeholder="Jane Doe")
+                        c_email = st.text_input("Email Address (for demand copies) *", placeholder="jane@example.com")
+                    with col_u2:
+                        c_phone = st.text_input("Mobile Phone (for real-time SMS status alerts) *", placeholder="+13035550199")
+                        c_address = st.text_input("Mailing Address *", placeholder="123 Main St, Denver, CO 80202")
 
-            st.progress((step_idx + 1) / len(steps))
-            st.write(f"**Current Milestone:** {steps[step_idx]}")
+                    st.markdown("#### 2. Incident & Account Verification")
+                    col_i1, col_i2 = st.columns(2)
+                    with col_i1:
+                        if vertical == "flight_disruption":
+                            c_pnr = st.text_input("6-Character Booking Ref (PNR) *", value=claim.get("pnr") or "", placeholder="e.g., K82X9Q").upper()
+                            c_acct = None
+                        elif vertical == "isp_outage":
+                            c_acct = st.text_input("ISP / Utility Account Number *", value=claim.get("account_number") or "", placeholder="e.g., 8497-10-9281920")
+                            c_pnr = None
+                        else:
+                            c_pnr = None
+                            c_acct = st.text_input("Lease / Account Reference", placeholder="Account or Property Ref")
+                    with col_i2:
+                        c_date = st.text_input("Date of Incident / Outage (YYYY-MM-DD) *", placeholder="2026-09-01")
 
-            if status == "settled":
-                fee = float(claim.get("fee_collected") or 0)
-                client_net = payout - fee
-                st.success(f"🎉 **Dispute Resolved!** Net disbursement: **${client_net:.2f}** (after statutory contingency fee: ${fee:.2f}).")
-            elif status in ("staged_for_review", "approved"):
-                st.warning("Action Required: Please complete authorization to proceed with formal recovery.")
+                    st.markdown("#### 3. Representation Agreement & E-Signature")
+                    st.caption(
+                        "By signing below, you authorize Dispute Agent to serve formal statutory demand packages, "
+                        "communicate with the respondent's legal department on your behalf, and agree to the 25% contingency fee deducted upon successful recovery."
+                    )
+                    c_signature = st.text_input("Type Your Full Legal Name to E-Sign *", placeholder="Jane Doe")
+                    terms_agreed = st.checkbox("I agree to the Representation Terms, Statutory Demand Filing, and SMS updates.")
+
+                    btn_submit = st.form_submit_button("🚀 Authorize & Dispatch Statutory Demand Package")
+
+                    if btn_submit:
+                        if not (c_name and c_email and c_phone and c_signature and terms_agreed):
+                            st.error("Please complete all required fields and accept the representation terms.")
+                        else:
+                            payload = {
+                                "lead_id": claim_id_param,
+                                "claimant_name": c_name.strip(),
+                                "claimant_email": c_email.strip(),
+                                "claimant_phone": c_phone.strip(),
+                                "claimant_address": c_address.strip() if c_address else "",
+                                "pnr": c_pnr,
+                                "account_number": c_acct,
+                                "incident_date": c_date.strip() if c_date else "",
+                                "digital_signature": c_signature.strip()
+                            }
+                            with st.spinner("Compiling formal PDF demand and dispatching..."):
+                                sub_res = requests.post(f"{API_BASE}/api/v1/claims/submit", json=payload, timeout=20)
+                                if sub_res.status_code == 200:
+                                    st.success("✅ Claim Authorized! Demand letter compiled and served. SMS updates activated.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Error submitting authorization: {sub_res.text}")
+
+            # SCENARIO B: ACTIVE TRACKING TIMELINE
+            else:
+                st.subheader("Dispute Resolution Progress")
+                steps = ["Authorized", "Demand Dispatched to Legal", "Settlement Reconciled"]
+                step_idx = 0
+                if status == "dispatched":
+                    step_idx = 1
+                elif status == "settled":
+                    step_idx = 2
+
+                st.progress((step_idx + 1) / len(steps))
+                st.write(f"**Current Milestone:** {steps[step_idx]}")
+
+                if status == "dispatched":
+                    st.info("📨 **Formal Demand Served:** Legal package served to respondent compliance desk. Mandatory 14-day response window active.")
+                elif status == "settled":
+                    recovery = float(claim.get("recovery_amount") or est_comp)
+                    fee = float(claim.get("fee_collected") or (recovery * 0.25))
+                    net = recovery - fee
+                    st.success(
+                        f"🎉 **Claim Settled!**\n\n"
+                        f"- **Gross Recovered:** ${recovery:.2f}\n"
+                        f"- **Platform Fee (25%):** ${fee:.2f}\n"
+                        f"- **Net Payout to You:** **${net:.2f}**"
+                    )
         else:
-            st.error("Dispute record not found. Please verify your claim reference URL.")
+            st.error("Dispute record not found. Please check your tracking link.")
     except Exception as e:
-        st.error(f"Error fetching tracking data: {e}")
+        st.error(f"Error loading claim portal: {e}")
 
     st.stop()
 
-# =========================================================
-# AUTHENTICATION & SESSION STATE MANAGEMENT
-# =========================================================
+# =====================================================================
+# AUTHENTICATION & OPERATOR DESK (Standard Admin View)
+# =====================================================================
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "user_info" not in st.session_state:
@@ -132,23 +204,17 @@ def render_login_screen():
         if st.session_state.pending_2fa_user:
             user = st.session_state.pending_2fa_user
             st.info(f"Two-Factor Authentication required for **{user['username']}**.")
-            
             with st.form("form_2fa"):
                 otp_code = st.text_input("Enter 6-Digit Authenticator Code", max_chars=6, type="password")
-                btn_verify = st.form_submit_button("Verify Code & Sign In")
-                
-                if btn_verify:
-                    totp = pyotp.TOTP(user["totp_secret"])
-                    if totp.verify(otp_code.strip()):
+                if st.form_submit_button("Verify Code & Sign In"):
+                    if pyotp.TOTP(user["totp_secret"]).verify(otp_code.strip()):
                         st.session_state.authenticated = True
                         st.session_state.user_info = user
                         st.session_state.pending_2fa_user = None
-                        st.success("Authentication successful.")
                         st.rerun()
                     else:
                         st.error("Invalid or expired 2FA code.")
-            
-            if st.button("← Back to Username/Password"):
+            if st.button("← Back to Sign In"):
                 st.session_state.pending_2fa_user = None
                 st.rerun()
             return
@@ -156,403 +222,111 @@ def render_login_screen():
         with st.form("form_login"):
             username_input = st.text_input("Username").strip().lower()
             password_input = st.text_input("Password", type="password")
-            btn_login = st.form_submit_button("Sign In")
-
-            if btn_login:
+            if st.form_submit_button("Sign In"):
                 if not username_input or not password_input:
                     st.error("Please enter both username and password.")
-                    return
+                else:
+                    try:
+                        conn = get_db()
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT * FROM admin_users WHERE username = %s AND is_active = TRUE;", (username_input,))
+                            user_record = cur.fetchone()
+                        conn.close()
 
-                try:
-                    conn = get_db()
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT * FROM admin_users WHERE username = %s AND is_active = TRUE;", (username_input,))
-                        user_record = cur.fetchone()
-                    conn.close()
-
-                    if user_record and bcrypt.checkpw(password_input.encode('utf-8'), user_record["password_hash"].encode('utf-8')):
-                        if user_record.get("is_2fa_enabled") and user_record.get("totp_secret"):
-                            st.session_state.pending_2fa_user = user_record
-                            st.rerun()
+                        if user_record and bcrypt.checkpw(password_input.encode('utf-8'), user_record["password_hash"].encode('utf-8')):
+                            if user_record.get("is_2fa_enabled") and user_record.get("totp_secret"):
+                                st.session_state.pending_2fa_user = user_record
+                                st.rerun()
+                            else:
+                                st.session_state.authenticated = True
+                                st.session_state.user_info = user_record
+                                st.rerun()
                         else:
-                            st.session_state.authenticated = True
-                            st.session_state.user_info = user_record
-                            st.success("Login successful.")
-                            st.rerun()
-                    else:
-                        st.error("Invalid username or password.")
-                except Exception as e:
-                    st.error(f"Database error: {e}")
+                            st.error("Invalid username or password.")
+                    except Exception as e:
+                        st.error(f"Database error: {e}")
 
 if not st.session_state.authenticated:
     render_login_screen()
     st.stop()
 
-# =========================================================
-# AUTHENTICATED OPERATOR DESK
-# =========================================================
+# =====================================================================
+# AUTHENTICATED OPERATOR TABS
+# =====================================================================
 current_user = st.session_state.user_info
 user_role = current_user.get("role", "claims_agent")
 
 with st.sidebar:
     st.markdown(f"### 👤 Logged In: `{current_user['username']}`")
     st.markdown(f"**Name:** {current_user['full_name']}")
-    
-    role_badge = {
-        "super_admin": "🔴 Super Admin (Full Control)",
-        "claims_manager": "🟠 Claims Manager",
-        "claims_agent": "🔵 Claims Agent",
-        "auditor": "🟢 Read-Only Auditor"
-    }.get(user_role, user_role)
-    st.markdown(f"**Role:** {role_badge}")
-    
-    st.divider()
-    st.subheader("🔐 Two-Factor Security")
-
-    conn = get_db()
-    with conn.cursor() as cur:
-        cur.execute("SELECT is_2fa_enabled, totp_secret FROM admin_users WHERE id = %s;", (current_user["id"],))
-        latest_auth = cur.fetchone()
-    conn.close()
-
-    is_2fa_active = latest_auth["is_2fa_enabled"] if latest_auth else False
-    totp_secret = latest_auth["totp_secret"] if latest_auth else pyotp.random_base32()
-
-    if not is_2fa_active:
-        st.warning("2FA is **Disabled**.")
-        with st.expander("Enable 2FA Authenticator"):
-            totp_uri = pyotp.totp.TOTP(totp_secret).provisioning_uri(
-                name=current_user['username'],
-                issuer_name="DisputeAgent"
-            )
-            qr = qrcode.QRCode(box_size=4, border=2)
-            qr.add_data(totp_uri)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white")
-            img_buf = io.BytesIO()
-            img.save(img_buf, format="PNG")
-            
-            st.image(img_buf.getvalue(), caption="Scan with Google Authenticator / Authy")
-            st.code(totp_secret, language="text")
-            
-            verify_token = st.text_input("Enter 6-Digit Code to Activate", max_chars=6, key="act_2fa")
-            if st.button("Activate 2FA"):
-                if pyotp.TOTP(totp_secret).verify(verify_token.strip()):
-                    conn = get_db()
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE admin_users SET is_2fa_enabled = TRUE, totp_secret = %s WHERE id = %s;", (totp_secret, current_user["id"]))
-                    conn.close()
-                    st.success("2FA successfully enabled!")
-                    st.rerun()
-                else:
-                    st.error("Invalid token. 2FA not enabled.")
-    else:
-        st.success("2FA is **Active**.")
-        if st.button("Disable 2FA"):
-            conn = get_db()
-            with conn.cursor() as cur:
-                cur.execute("UPDATE admin_users SET is_2fa_enabled = FALSE WHERE id = %s;", (current_user["id"],))
-            conn.close()
-            st.warning("2FA has been disabled.")
-            st.rerun()
-
+    st.markdown(f"**Role:** {user_role.replace('_', ' ').title()}")
     st.divider()
     if st.button("🚪 Sign Out"):
         st.session_state.authenticated = False
         st.session_state.user_info = None
         st.rerun()
 
-# Dynamic Tab Configuration
-tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue", "📖 Operations Manual"]
+tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue"]
 if user_role == "super_admin":
     tab_titles.append("👥 User Administration")
 
 tabs = st.tabs(tab_titles)
-tab_review = tabs[0]
-tab_active = tabs[1]
-tab_webhooks = tabs[2]
-tab_dlq = tabs[3]
-tab_manual = tabs[4]
-tab_users = tabs[5] if user_role == "super_admin" else None
 
-# --- TAB 1: INGESTION QUEUE ---
-with tab_review:
+with tabs[0]:
     st.subheader("Staged Consumer Signals")
-    vertical_filter = st.selectbox("Filter Vertical", ["All Verticals", "flight_disruption", "isp_outage", "security_deposit", "class_action"])
-    try:
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM v_staged_leads_for_review LIMIT 50;")
+        leads = cur.fetchall()
+    conn.close()
+    if leads:
+        df = pd.DataFrame(leads)
+        st.dataframe(df[["id", "vertical", "carrier_name", "estimated_compensation", "regulatory_framework", "created_at"]], use_container_width=True)
+    else:
+        st.info("No leads pending review.")
+
+with tabs[1]:
+    st.subheader("Active & Settled Claims Ledger")
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id::text AS id, vertical, carrier_name, claimant_name, recovery_amount, fee_collected, status FROM leads WHERE status IN ('opted_in', 'dispatched', 'settled') ORDER BY updated_at DESC LIMIT 100;")
+        claims_list = cur.fetchall()
+    conn.close()
+    if claims_list:
+        st.dataframe(pd.DataFrame(claims_list), use_container_width=True)
+    else:
+        st.info("No active claims.")
+
+with tabs[2]:
+    st.subheader("Inbound Carrier Telemetry Events")
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id::text, carrier_name, vertical, event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 50;")
+        events = cur.fetchall()
+    conn.close()
+    if events:
+        st.dataframe(pd.DataFrame(events), use_container_width=True)
+    else:
+        st.info("No webhook events logged.")
+
+with tabs[3]:
+    st.subheader("⚠️ Dead-Letter Queue (DLQ)")
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id::text AS id, carrier_name, claimant_name, dispatch_attempts, last_dispatch_error, status FROM leads WHERE status='dispatch_failed' OR last_dispatch_error IS NOT NULL;")
+        dlq = cur.fetchall()
+    conn.close()
+    if dlq:
+        st.dataframe(pd.DataFrame(dlq), use_container_width=True)
+    else:
+        st.success("✅ Dead-Letter Queue is clear.")
+
+if user_role == "super_admin" and len(tabs) > 4:
+    with tabs[4]:
+        st.subheader("👥 User Management & Role Provisioning")
         conn = get_db()
         with conn.cursor() as cur:
-            query = "SELECT * FROM v_staged_leads_for_review"
-            params = []
-            if vertical_filter != "All Verticals":
-                query += " WHERE vertical = %s"
-                params.append(vertical_filter)
-            query += " LIMIT 50;"
-            cur.execute(query, tuple(params))
-            leads = cur.fetchall()
+            cur.execute("SELECT id::text AS id, username, full_name, role, is_2fa_enabled, is_active FROM admin_users ORDER BY created_at ASC;")
+            users = cur.fetchall()
         conn.close()
-
-        if leads:
-            df = pd.DataFrame(leads)
-            st.dataframe(df[["id", "vertical", "carrier_name", "estimated_compensation", "regulatory_framework", "created_at"]], use_container_width=True)
-            
-            if user_role != "auditor":
-                st.divider()
-                st.subheader("Action Selected Dispute Lead")
-                sel_id = st.selectbox("Inspect Lead ID", [l["id"] for l in leads])
-                selected_lead = next(l for l in leads if l["id"] == sel_id)
-
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.markdown(f"**Entity:** `{selected_lead['carrier_name']}` | **Valuation:** ${float(selected_lead['estimated_compensation'] or 0):.2f}")
-                    st.markdown(f"**Framework:** {selected_lead['regulatory_framework']}")
-                    st.info(f"**AI Reasoning:**\n{selected_lead['ai_reasoning']}")
-
-                with col_b:
-                    outreach_text = st.text_area("Outreach Copy", value=selected_lead["outreach_copy"] or "", height=120)
-                    c_btn1, c_btn2 = st.columns(2)
-                    if c_btn1.button("✅ Approve Outreach", key=f"app_{sel_id}"):
-                        conn = get_db()
-                        with conn.cursor() as cur:
-                            cur.execute("UPDATE leads SET status='approved', outreach_copy=%s, updated_at=NOW() WHERE id::text=%s", (outreach_text, sel_id))
-                        conn.close()
-                        st.success("Lead approved.")
-                        st.rerun()
-
-                    if c_btn2.button("❌ Dismiss / Reject", key=f"rej_{sel_id}"):
-                        conn = get_db()
-                        with conn.cursor() as cur:
-                            cur.execute("UPDATE leads SET status='rejected', updated_at=NOW() WHERE id::text=%s", (sel_id,))
-                        conn.close()
-                        st.warning("Lead rejected.")
-                        st.rerun()
-        else:
-            st.info("No leads currently pending review.")
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-# --- TAB 2: ACTIVE & SETTLED CLAIMS ---
-with tab_active:
-    st.subheader("Active Dispute Portfolio & Ledger")
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id::text AS id, vertical, carrier_name, claimant_name, recovery_amount, fee_collected, status, created_at 
-                FROM leads WHERE status IN ('opted_in', 'dispatched', 'settled') ORDER BY updated_at DESC LIMIT 100;
-            """)
-            claims = cur.fetchall()
-        conn.close()
-
-        if claims:
-            df_claims = pd.DataFrame(claims)
-            tot_rec = df_claims["recovery_amount"].astype(float).sum()
-            tot_fee = df_claims["fee_collected"].astype(float).sum()
-
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Active / Resolved Portfolio", len(df_claims))
-            m2.metric("Total Recovered Payouts", f"${tot_rec:.2f}")
-            m3.metric("Platform Fees Collected (25%)", f"${tot_fee:.2f}")
-            st.dataframe(df_claims, use_container_width=True)
-        else:
-            st.info("No active claims in portfolio.")
-    except Exception as e:
-        st.error(f"Database error: {e}")
-
-# --- TAB 3: INBOUND CARRIER WEBHOOK AUDIT ---
-with tab_webhooks:
-    st.subheader("Carrier & Utility Telemetry Events")
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id::text AS event_id, lead_id::text AS matched_lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 50;")
-            events = cur.fetchall()
-        conn.close()
-        if events:
-            st.dataframe(pd.DataFrame(events), use_container_width=True)
-        else:
-            st.info("No inbound carrier events recorded.")
-    except Exception as e:
-        st.error(f"Error fetching webhooks: {e}")
-
-# --- TAB 4: DEAD-LETTER QUEUE (DLQ) ---
-with tab_dlq:
-    st.subheader("⚠️ Dead-Letter Queue & Transmission Overrides")
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id::text AS id, vertical, carrier_name, claimant_name, claimant_email, dispatch_attempts, last_dispatch_error, status FROM leads WHERE status='dispatch_failed' OR last_dispatch_error IS NOT NULL;")
-            dlq_records = cur.fetchall()
-        conn.close()
-
-        if dlq_records:
-            st.dataframe(pd.DataFrame(dlq_records), use_container_width=True)
-            if user_role in ("super_admin", "claims_manager"):
-                sel_dlq = st.selectbox("Select Stalled Claim", [d["id"] for d in dlq_records])
-                if st.button("🔄 Force Immediate Re-Dispatch", key=f"force_{sel_dlq}"):
-                    conn = get_db()
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE leads SET status='opted_in', dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_retry_at=NOW(), updated_at=NOW() WHERE id::text=%s;", (sel_dlq,))
-                    conn.close()
-                    st.success("Claim requeued for carrier dispatch.")
-                    st.rerun()
-        else:
-            st.success("✅ Dead-Letter Queue is clear.")
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-# --- TAB 5: COMPREHENSIVE OPERATIONS & RBAC MANUAL ---
-with tab_manual:
-    st.header("📖 Dispute Agent Platform: Field Manual & RBAC Guide")
-    st.caption("Standard Operating Procedures, Statutory Frameworks, and Team Administration Guidelines.")
-
-    with st.expander("1. System Purpose & Plain-English Overview", expanded=True):
-        st.markdown("""
-        **What Dispute Agent Does:**
-        When corporations cause non-excludable consumer disruptions (e.g., flight delays, multi-day internet outages, withheld security deposits), statutory regulations mandate liquidated cash compensation or bill credits. 
-        
-        The Dispute Agent engine automatically:
-        1. **Identifies** public complaints on social platforms (e.g., Reddit).
-        2. **Evaluates** the legal violation and computes the owed compensation using Google Gemini.
-        3. **Engages** the affected consumer with a pre-written statutory assessment.
-        4. **Generates & Serves** formal demand letters (PDF) directly to airline and utility legal desks upon claimant digital opt-in.
-        5. **Reconciles** inbound carrier payout decisions and deducts a **25% contingency fee**.
-        """)
-
-    with st.expander("2. Supported Dispute Verticals & Statutory Laws", expanded=False):
-        st.markdown("""
-        * **✈️ Flight Disruptions (`flight_disruption`)**
-            * *US DOT 14 CFR Part 260*: Mandates automatic cash refunds for cancellations or significant delays (>3 hrs domestic, >6 hrs international) where alternative travel is declined.
-            * *UK261 / EU261*: Entitles passengers to flat monetary compensation (**€250 to €600**) for flight cancellations or delays exceeding 3 hours caused by operational/mechanical airline fault.
-        * **🌐 Telecom & ISP Outages (`isp_outage`)**
-            * *State Public Utility Commission (PUC) Tariffs & FCC Mandates*: Requires broadband providers (Comcast, AT&T, Charter) to issue prorated bill credits and service outage offsets for sustained downtime exceeding statutory thresholds (typically >4 to 24 hours).
-        * **🏠 Security Deposit Non-Compliance (`security_deposit`)**
-            * *State Residential Tenancy Acts (e.g., CRS 38-12-103)*: Landlords must return security deposits or provide an itemized list of deductions within 30 to 60 days. Failure to do so incurs strict liability penalties of **2x to 3x the deposit amount**.
-        * **⚖️ Active Class Action Restitution (`class_action`)**
-            * Matches qualified consumers against active FTC restitution funds and court-approved settlement claims pools.
-        """)
-
-    with st.expander("3. User Roles & Permission Hierarchy (RBAC)", expanded=True):
-        st.markdown("""
-        | Role Key | Role Name | System Capabilities & Permissions |
-        |---|---|---|
-        | `super_admin` | **Super Admin** | **Full System Authority.** Review queue, DLQ overrides, claim settlement, 2FA administration, and **User Administration** (creating logins, updating roles, resetting user 2FA). |
-        | `claims_manager` | **Claims Manager** | Review & approve incoming signals, edit outreach copy, inspect webhooks, and trigger manual re-dispatches on the Dead-Letter Queue (DLQ). *Cannot create or manage users.* |
-        | `claims_agent` | **Claims Agent** | Review incoming social signals, edit outreach fragments, and mark leads as approved or rejected. *Cannot access DLQ re-dispatch or user administration.* |
-        | `auditor` | **Auditor** | **Read-Only Access.** View active claim portfolios, fee ledgers, and carrier webhook logs. Cannot approve leads, dismiss claims, or alter configuration. |
-        """)
-
-    with st.expander("4. How to Administer Logins, Passwords & 2FA", expanded=False):
-        st.markdown("""
-        **To Provision a New Team Member (Super Admins Only):**
-        1. Click the **👥 User Administration** tab (visible only to `super_admin`).
-        2. Fill out the **Provision New User** form:
-           * Enter a lowercase `username` (e.g., `jdoe`).
-           * Enter their `Full Name` and a temporary password.
-           * Select their role based on the permission matrix above.
-        3. Click **Create User Account**. The password is encrypted with `bcrypt` directly into `dispute_db_f372`.
-
-        **Managing Roles & 2FA Resets:**
-        * In the right column under **Manage User Credentials**, select any user.
-        * To change their access level, pick a new role from the dropdown and click **Save Role**.
-        * If a user loses their phone or authenticator app, click **Reset 2FA for User**. Their two-factor authentication will be disabled, allowing them to sign in with their password and scan a new QR code.
-
-        **Personal 2FA Activation:**
-        * Every operator can secure their account in the **left sidebar** under **Two-Factor Security**.
-        * Expand **Enable 2FA Authenticator**, scan the QR code in Google Authenticator or 1Password, enter the 6-digit code, and click **Activate 2FA**.
-        """)
-
-    with st.expander("5. Resolving Failed Demands in the Dead-Letter Queue (DLQ)", expanded=False):
-        st.markdown("""
-        * When a carrier email fails to send (due to network timeout or SMTP rejection), `carrier_retry_worker.py` attempts exponential backoff retries ($2^1, 2^2, 2^3, 2^4, 2^5$ minutes).
-        * If 5 attempts fail, the claim enters the **⚠️ Dead-Letter Queue** tab as `dispatch_failed`.
-        * To resolve:
-          1. Go to the **Dead-Letter Queue** tab.
-          2. Inspect the recorded transmission error.
-          3. Click **🔄 Force Immediate Re-Dispatch** to reset the attempt counter and queue the demand letter for immediate re-transmission.
-        """)
-
-# --- TAB 6: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
-if tab_users and user_role == "super_admin":
-    with tab_users:
-        st.subheader("👥 User Management & Role-Based Access Control")
-        st.caption("Administer team members, assign operational roles, or provision credentials.")
-
-        col_new_user, col_user_list = st.columns([1, 1.4])
-
-        with col_new_user:
-            st.markdown("#### Provision New User")
-            with st.form("form_create_user"):
-                new_username = st.text_input("Username").strip().lower()
-                new_full_name = st.text_input("Full Name")
-                new_password = st.text_input("Temporary Password", type="password")
-                new_role = st.selectbox("Assign Role", [
-                    ("claims_agent", "Claims Agent (Queue Review & Outreach)"),
-                    ("claims_manager", "Claims Manager (Queue & DLQ Control)"),
-                    ("auditor", "Auditor (Read-Only Telemetry)"),
-                    ("super_admin", "Super Admin (Full Access & User Admin)")
-                ], format_func=lambda x: x[1])[0]
-
-                btn_create = st.form_submit_button("Create User Account")
-                if btn_create:
-                    if not new_username or not new_password or not new_full_name:
-                        st.error("All fields are required.")
-                    else:
-                        try:
-                            hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                            seed = pyotp.random_base32()
-                            conn = get_db()
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    INSERT INTO admin_users (username, full_name, password_hash, role, is_2fa_enabled, totp_secret)
-                                    VALUES (%s, %s, %s, %s, FALSE, %s);
-                                """, (new_username, new_full_name, hashed, new_role, seed))
-                            conn.close()
-                            st.success(f"User `{new_username}` created successfully with role `{new_role}`.")
-                            st.rerun()
-                        except psycopg2.IntegrityError:
-                            st.error(f"Username `{new_username}` already exists.")
-                        except Exception as e:
-                            st.error(f"Error creating user: {e}")
-
-        with col_user_list:
-            st.markdown("#### Active System Users")
-            try:
-                conn = get_db()
-                with conn.cursor() as cur:
-                    cur.execute("SELECT id::text AS id, username, full_name, role, is_2fa_enabled, is_active, created_at FROM admin_users ORDER BY created_at ASC;")
-                    all_users = cur.fetchall()
-                conn.close()
-
-                if all_users:
-                    df_users = pd.DataFrame(all_users)
-                    st.dataframe(df_users[["username", "full_name", "role", "is_2fa_enabled", "is_active"]], use_container_width=True)
-
-                    st.divider()
-                    st.markdown("#### Manage User Credentials")
-                    user_to_edit = st.selectbox("Select User", [u["username"] for u in all_users if u["username"] != current_user["username"]])
-                    if user_to_edit:
-                        u_data = next(u for u in all_users if u["username"] == user_to_edit)
-                        
-                        col_u1, col_u2 = st.columns(2)
-                        with col_u1:
-                            new_assigned_role = st.selectbox("Update Role", ["claims_agent", "claims_manager", "auditor", "super_admin"], index=["claims_agent", "claims_manager", "auditor", "super_admin"].index(u_data["role"]))
-                            if st.button(f"Save Role for {user_to_edit}"):
-                                conn = get_db()
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE admin_users SET role = %s, updated_at = NOW() WHERE username = %s;", (new_assigned_role, user_to_edit))
-                                conn.close()
-                                st.success("Role updated.")
-                                st.rerun()
-
-                        with col_u2:
-                            if st.button(f"Reset 2FA for {user_to_edit}"):
-                                new_seed = pyotp.random_base32()
-                                conn = get_db()
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE admin_users SET is_2fa_enabled = FALSE, totp_secret = %s, updated_at = NOW() WHERE id = %s;", (new_seed, u_data["id"]))
-                                conn.close()
-                                st.warning(f"2FA disabled and reset for `{user_to_edit}`.")
-                                st.rerun()
-            except Exception as e:
-                st.error(f"Error fetching users: {e}")
+        st.dataframe(pd.DataFrame(users), use_container_width=True)
