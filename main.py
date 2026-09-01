@@ -421,3 +421,51 @@ def submit_authorized_claim(req: dict):
         if conn:
             conn.close()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/claims/settle")
+def settle_claim(payload: dict):
+    lead_id = payload.get("lead_id")
+    settled_amount = float(payload.get("settled_amount", 0.0))
+    payout_ref = payload.get("payout_reference", "DIRECT_DEPOSIT")
+    
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        contingency_fee = round(settled_amount * 0.25, 2)
+        claimant_payout = round(settled_amount - contingency_fee, 2)
+
+        cur.execute(
+            """
+            UPDATE leads
+            SET status = 'settled',
+                recovery_amount = %s,
+                fee_collected = %s,
+                updated_at = NOW()
+            WHERE id::text = %s OR lead_id = %s
+            RETURNING id, claimant_name, carrier_name
+            """,
+            (settled_amount, contingency_fee, lead_id, lead_id)
+        )
+        updated = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="Lead ID not found")
+
+        return {
+            "status": "settled",
+            "lead_id": lead_id,
+            "total_recovery": settled_amount,
+            "contingency_fee_collected": contingency_fee,
+            "net_claimant_disbursement": claimant_payout,
+            "payout_reference": payout_ref
+        }
+    except Exception as e:
+        if conn:
+            conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
