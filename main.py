@@ -102,6 +102,7 @@ def get_leads(status: str = "staged_for_review"):
 def evaluate_lead(payload: dict):
     post_text = payload.get("post_text", "")
     username = payload.get("username", "anonymous")
+    platform_user_id = payload.get("platform_user_id") or payload.get("user_id") or username
     post_url = payload.get("post_url", "")
     platform = payload.get("source_platform", "reddit")
 
@@ -166,15 +167,15 @@ def evaluate_lead(payload: dict):
         cur.execute(
             """
             INSERT INTO leads (
-                source_platform, username, post_url, raw_post_text,
+                platform_user_id, source_platform, username, post_url, raw_post_text,
                 carrier_name, incident_identifier, estimated_compensation,
                 regulatory_framework, ai_reasoning, outreach_copy, status, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review', NOW(), NOW())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review', NOW(), NOW())
             RETURNING id::text AS lead_id
             """,
             (
-                platform, username, post_url, post_text,
+                platform_user_id, platform, username, post_url, post_text,
                 eval_data.get("carrier", "Carrier"),
                 eval_data.get("flight_number", "Flight"),
                 float(eval_data.get("estimated_compensation", 650.0)),
