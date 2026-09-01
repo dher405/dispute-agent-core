@@ -300,7 +300,7 @@ def get_claim_tracking_status(lead_id: str):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
             """
-            SELECT lead_id, status, source_platform, carrier_name, 
+            SELECT id AS lead_id, status, source_platform, carrier_name, 
                    incident_identifier, estimated_compensation, regulatory_framework,
                    claimant_name, updated_at, created_at
             FROM leads
@@ -444,7 +444,7 @@ def settle_claim(payload: dict):
                 recovery_amount = %s,
                 fee_collected = %s,
                 updated_at = NOW()
-            WHERE id::text = %s OR lead_id = %s
+            WHERE id::text = %s
             RETURNING id, claimant_name, carrier_name
             """,
             (settled_amount, contingency_fee, lead_id, lead_id)
