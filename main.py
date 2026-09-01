@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, status, Query
@@ -16,14 +16,25 @@ from sms_dispatcher import notify_claim_event
 from carrier_dispatcher import dispatch_demand_email
 from letter_generator import StatutoryDemandGenerator
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s")
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-app = FastAPI(title="Dispute Agent Core Engine", version="2.5.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(
+    title="Dispute Agent Core Engine",
+    description="Autonomous multi-vertical statutory dispute recovery platform.",
+    version="2.6.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def get_db():
     if not DATABASE_URL:
@@ -33,6 +44,8 @@ def get_db():
         yield conn
     finally:
         conn.close()
+
+# --- Schemas ---
 
 class RawSignalPayload(BaseModel):
     source_platform: str = Field(..., example="reddit")
@@ -66,146 +79,365 @@ class SettlementPayload(BaseModel):
     lead_id: str
     recovery_amount: Decimal
 
+# --- Background Task Routines ---
+
 def trigger_carrier_demand_pipeline(lead_id: str):
+    """Generates statutory PDF and emails respondent legal desk."""
     try:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM leads WHERE id::text = %s;", (lead_id,))
+            cur.execute("""
+                SELECT 
+                    id::text AS id,
+                    vertical,
+                    carrier_name,
+                    incident_identifier,
+                    account_number,
+                    outage_duration_hours,
+                    tier_speed_tier,
+                    estimated_compensation,
+                    recovery_amount,
+                    regulatory_framework,
+                    ai_reasoning,
+                    status,
+                    claimant_name,
+                    claimant_email,
+                    claimant_phone,
+                    claimant_address,
+                    pnr,
+                    incident_date,
+                    digital_signature
+                FROM leads
+                WHERE id::text = %s;
+            """, (lead_id,))
             lead = cur.fetchone()
+
             if not lead:
                 return
+
             pdf_bytes = StatutoryDemandGenerator.generate_pdf(lead)
             success, note = dispatch_demand_email(lead, pdf_bytes)
+
             if success:
-                cur.execute("UPDATE leads SET status = 'dispatched', updated_at = NOW() WHERE id::text = %s;", (lead_id,))
                 cur.execute("""
-                    INSERT INTO carrier_inbound_events (lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s);
-                """, (lead_id, lead.get("carrier_name") or "Carrier", lead.get("vertical") or "flight_disruption", "demand_dispatched", 0.00, note, psycopg2.extras.Json({"note": note})))
+                    UPDATE leads 
+                    SET status = 'dispatched', updated_at = NOW() 
+                    WHERE id::text = %s;
+                """, (lead_id,))
+                
+                cur.execute("""
+                    INSERT INTO carrier_inbound_events (
+                        lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """, (
+                    lead_id,
+                    lead.get("carrier_name") or "Carrier",
+                    lead.get("vertical") or "flight_disruption",
+                    "demand_dispatched",
+                    0.00,
+                    f"PDF demand served: {note}",
+                    psycopg2.extras.Json({"note": note})
+                ))
                 conn.commit()
         conn.close()
     except Exception as e:
-        logger.error(f"Error in demand pipeline: {e}")
+        logger.error(f"[BACKGROUND TASK ERROR] Demand pipeline error: {e}")
+
+# --- AI Evaluation Gateway ---
 
 def evaluate_multi_vertical_signal(text: str) -> Dict[str, Any]:
     client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = f"""Analyze consumer complaint for statutory compensation:
-Verticals:
-- 'flight_disruption': UK261/EU261, US DOT 14 CFR Part 260
-- 'isp_outage': PUC Utility Tariffs for >4hr downtime
-- 'security_deposit': State landlord deposit return penalty
-- 'class_action': Active settlement funds
-- 'other': Ineligible
+    prompt = f"""
+Analyze the consumer post for statutory compensation, bill credits, or regulatory refund eligibility.
 
-Post: "{text}"
-Return JSON:
+Verticals & Default Statutory Baselines:
+1. 'flight_disruption': UK261/EU261 (€250 to €600 / $300-$650 USD), US DOT 14 CFR Part 260 (full prompt refund for cancellation or >3hr domestic delay, baseline standard: $650.00 if ticket price unspecified).
+2. 'isp_outage': Regional utility/telecom tariffs and state SLA mandates (baseline standard: $50.00-$150.00 for sustained outages >4-24hrs).
+3. 'security_deposit': Statutory landlord penalties (2x to 3x deposit) for failure to return/itemize within statutory deadlines (e.g., 30-60 days).
+4. 'class_action': Active settlement funds or FTC restitution pools.
+5. 'other': Ineligible or non-statutory.
+
+Post Text:
+"{text}"
+
+Return strictly valid JSON matching this exact structure:
 {{
     "is_viable": true/false,
-    "vertical": "flight_disruption"|"isp_outage"|"security_deposit"|"class_action"|"other",
-    "carrier_name": "Name",
-    "incident_identifier": "Flight/Ticket/null",
-    "estimated_compensation": 0.00,
-    "regulatory_framework": "Legal Citation",
-    "ai_reasoning": "Reasoning breakdown",
-    "outreach_copy": "Outreach text under 250 chars"
-}}"""
+    "vertical": "flight_disruption" | "isp_outage" | "security_deposit" | "class_action" | "other",
+    "carrier_name": "Identified Carrier/ISP/Entity name or Unknown",
+    "incident_identifier": "Flight number, Ticket ID, Account Ref, or null",
+    "estimated_compensation": 650.00,
+    "regulatory_framework": "e.g., US DOT 14 CFR Part 260 | UK261/EU261 | State PUC Tariff Rule 21 | C.R.S. § 38-12-103",
+    "ai_reasoning": "Clear statutory breakdown of why this compensation is legally owed.",
+    "outreach_copy": "Direct second-person message TO THE CONSUMER (under 240 chars). Clearly state that the OPPOSING ENTITY violated statutory rules and specify the exact dollar amount the consumer can recover."
+}}
+"""
     try:
-        res = client.models.generate_content(model="gemini-3.6-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1))
-        return json.loads(res.text)
-    except Exception:
-        fallback = client.models.generate_content(model="gemini-2.0-flash", contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1))
+        response = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        logger.warning(f"Primary model failure: {e}. Falling back to gemini-2.0-flash.")
+        fallback = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
         return json.loads(fallback.text)
 
-@app.get("/health")
+# --- Routes ---
+
+@app.get("/health", status_code=status.HTTP_200_OK)
 def health_check():
     return {"status": "healthy", "service": "dispute-api"}
 
 @app.post("/api/v1/leads/evaluate", status_code=status.HTTP_201_CREATED)
 def intake_and_evaluate(payload: RawSignalPayload, conn=Depends(get_db)):
-    ev = evaluate_multi_vertical_signal(payload.raw_post_text)
-    if not ev.get("is_viable", False):
-        return {"status": "ignored", "reason": "Not viable under statutory frameworks"}
+    eval_result = evaluate_multi_vertical_signal(payload.raw_post_text)
+    
+    if not eval_result.get("is_viable", False):
+        return {"status": "ignored", "reason": "No viable statutory or tariff violation detected."}
+
+    query = """
+    INSERT INTO leads (
+        vertical,
+        source_platform,
+        platform_user_id,
+        username,
+        post_url,
+        raw_post_text,
+        carrier_name,
+        incident_identifier,
+        estimated_compensation,
+        regulatory_framework,
+        ai_reasoning,
+        outreach_copy,
+        status
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review')
+    RETURNING id::text, vertical, carrier_name, estimated_compensation, status;
+    """
+    params = (
+        eval_result.get("vertical", "flight_disruption"),
+        payload.source_platform,
+        payload.platform_user_id,
+        payload.username,
+        payload.post_url,
+        payload.raw_post_text,
+        eval_result.get("carrier_name"),
+        eval_result.get("incident_identifier"),
+        eval_result.get("estimated_compensation", 0.00),
+        eval_result.get("regulatory_framework"),
+        eval_result.get("ai_reasoning"),
+        eval_result.get("outreach_copy")
+    )
+
     with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO leads (vertical, source_platform, platform_user_id, username, post_url, raw_post_text, carrier_name, incident_identifier, estimated_compensation, regulatory_framework, ai_reasoning, outreach_copy, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review')
-            RETURNING id::text, vertical, carrier_name, estimated_compensation, status;
-        """, (ev.get("vertical", "flight_disruption"), payload.source_platform, payload.platform_user_id, payload.username, payload.post_url, payload.raw_post_text, ev.get("carrier_name"), ev.get("incident_identifier"), ev.get("estimated_compensation", 0.00), ev.get("regulatory_framework"), ev.get("ai_reasoning"), ev.get("outreach_copy")))
-        inserted = cur.fetchone()
+        cur.execute(query, params)
+        inserted_lead = cur.fetchone()
         conn.commit()
-    return {"status": "staged", "lead": inserted}
+
+    return {"status": "staged", "lead": inserted_lead}
 
 @app.get("/api/v1/leads")
 def list_leads(status: Optional[str] = Query(None), conn=Depends(get_db)):
-    query = "SELECT id::text AS id, vertical, source_platform, username, carrier_name, incident_identifier, estimated_compensation, recovery_amount, fee_collected, regulatory_framework, ai_reasoning, outreach_copy, status, created_at FROM leads"
+    query = """
+    SELECT 
+        id::text AS id,
+        vertical,
+        source_platform,
+        username,
+        carrier_name,
+        incident_identifier,
+        estimated_compensation,
+        recovery_amount,
+        fee_collected,
+        regulatory_framework,
+        ai_reasoning,
+        outreach_copy,
+        status,
+        created_at
+    FROM leads
+    """
     params = []
     if status:
         query += " WHERE status = %s"
         params.append(status)
     query += " ORDER BY created_at DESC LIMIT 100;"
+
     with conn.cursor() as cur:
         cur.execute(query, tuple(params))
-        return cur.fetchall()
+        leads = cur.fetchall()
+    return leads
 
 @app.get("/api/v1/claims/track/{lead_id}")
 def get_claim_tracking(lead_id: str, conn=Depends(get_db)):
     with conn.cursor() as cur:
-        cur.execute("SELECT id::text AS id, vertical, carrier_name, incident_identifier, estimated_compensation, recovery_amount, fee_collected, regulatory_framework, status, created_at, updated_at FROM leads WHERE id::text = %s;", (lead_id,))
+        cur.execute("""
+            SELECT 
+                id::text AS id,
+                vertical,
+                carrier_name,
+                incident_identifier,
+                account_number,
+                estimated_compensation,
+                recovery_amount,
+                fee_collected,
+                regulatory_framework,
+                status,
+                created_at,
+                updated_at
+            FROM leads
+            WHERE id::text = %s;
+        """, (lead_id,))
         claim = cur.fetchone()
+
     if not claim:
-        raise HTTPException(status_code=404, detail="Claim not found")
+        raise HTTPException(status_code=404, detail="Dispute claim not found.")
     return claim
 
 @app.post("/api/v1/claims/submit")
-def submit_claim(payload: ClaimSubmissionPayload, bg: BackgroundTasks, conn=Depends(get_db)):
+def submit_claim(payload: ClaimSubmissionPayload, background_tasks: BackgroundTasks, conn=Depends(get_db)):
+    query = """
+    UPDATE leads
+    SET claimant_name = %s,
+        claimant_email = %s,
+        claimant_phone = %s,
+        claimant_address = %s,
+        pnr = %s,
+        account_number = %s,
+        incident_date = %s,
+        digital_signature = %s,
+        status = 'opted_in',
+        updated_at = NOW()
+    WHERE id::text = %s
+    RETURNING id::text, status, claimant_name, claimant_email, claimant_phone;
+    """
     with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE leads SET claimant_name=%s, claimant_email=%s, claimant_phone=%s, claimant_address=%s, pnr=%s, account_number=%s, incident_date=%s, digital_signature=%s, status='opted_in', updated_at=NOW()
-            WHERE id::text=%s RETURNING id::text, status, claimant_name;
-        """, (payload.claimant_name, payload.claimant_email, payload.claimant_phone, payload.claimant_address, payload.pnr, payload.account_number, payload.incident_date, payload.digital_signature, payload.lead_id))
+        cur.execute(query, (
+            payload.claimant_name,
+            payload.claimant_email,
+            payload.claimant_phone,
+            payload.claimant_address,
+            payload.pnr,
+            payload.account_number,
+            payload.incident_date,
+            payload.digital_signature,
+            payload.lead_id
+        ))
         updated = cur.fetchone()
         conn.commit()
+
     if not updated:
-        raise HTTPException(status_code=404, detail="Lead not found")
+        raise HTTPException(status_code=404, detail="Lead ID not found.")
+
     if payload.claimant_phone:
-        bg.add_task(notify_claim_event, payload.lead_id, "opt_in_confirmation")
-    bg.add_task(trigger_carrier_demand_pipeline, payload.lead_id)
-    return {"status": "opted_in", "claim": updated}
+        background_tasks.add_task(notify_claim_event, payload.lead_id, "opt_in_confirmation")
+
+    background_tasks.add_task(trigger_carrier_demand_pipeline, payload.lead_id)
+
+    return {
+        "status": "opted_in",
+        "claim": updated,
+        "actions_dispatched": ["sms_opt_in_confirmation", "carrier_demand_dispatch"]
+    }
 
 @app.post("/api/v1/claims/settle")
-def settle_claim(payload: SettlementPayload, bg: BackgroundTasks, conn=Depends(get_db)):
+def settle_claim(payload: SettlementPayload, background_tasks: BackgroundTasks, conn=Depends(get_db)):
     fee = (payload.recovery_amount * Decimal("0.25")).quantize(Decimal("0.01"))
+    query = """
+    UPDATE leads
+    SET status = 'settled',
+        recovery_amount = %s,
+        fee_collected = %s,
+        updated_at = NOW()
+    WHERE id::text = %s
+    RETURNING id::text, status, recovery_amount, fee_collected, claimant_phone;
+    """
     with conn.cursor() as cur:
-        cur.execute("UPDATE leads SET status='settled', recovery_amount=%s, fee_collected=%s, updated_at=NOW() WHERE id::text=%s RETURNING id::text, status, recovery_amount, fee_collected;", (payload.recovery_amount, fee, payload.lead_id))
+        cur.execute(query, (payload.recovery_amount, fee, payload.lead_id))
         settled = cur.fetchone()
         conn.commit()
-    if not settled:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    bg.add_task(notify_claim_event, payload.lead_id, "settlement_alert")
-    return {"status": "settled", "claim": settled}
 
-@app.post("/api/v1/webhooks/carrier/inbound")
-def inbound_carrier_webhook(payload: CarrierWebhookPayload, bg: BackgroundTasks, conn=Depends(get_db)):
-    matched_id = None
+    if not settled:
+        raise HTTPException(status_code=404, detail="Lead ID not found.")
+
+    background_tasks.add_task(notify_claim_event, payload.lead_id, "settlement_alert")
+
+    return {
+        "status": "settled",
+        "claim": settled,
+        "actions_dispatched": ["sms_settlement_alert"]
+    }
+
+@app.post("/api/v1/webhooks/carrier/inbound", status_code=status.HTTP_200_OK)
+def inbound_carrier_response(payload: CarrierWebhookPayload, background_tasks: BackgroundTasks, conn=Depends(get_db)):
+    matched_lead_id = None
+    
     with conn.cursor() as cur:
         if payload.claim_id:
-            cur.execute("SELECT id::text FROM leads WHERE id::text = %s;", (str(payload.claim_id),))
-            r = cur.fetchone()
-            if r: matched_id = r["id"]
+            cur.execute("SELECT id::text, status FROM leads WHERE id::text = %s", (str(payload.claim_id),))
+            lead = cur.fetchone()
+            if lead:
+                matched_lead_id = lead["id"]
         elif payload.incident_identifier:
-            cur.execute("SELECT id::text FROM leads WHERE incident_identifier = %s AND carrier_name ILIKE %s ORDER BY created_at DESC LIMIT 1;", (payload.incident_identifier, f"%{payload.carrier_name}%"))
-            r = cur.fetchone()
-            if r: matched_id = r["id"]
+            cur.execute(
+                "SELECT id::text, status FROM leads WHERE incident_identifier = %s AND carrier_name ILIKE %s ORDER BY created_at DESC LIMIT 1",
+                (payload.incident_identifier, f"%{payload.carrier_name}%")
+            )
+            lead = cur.fetchone()
+            if lead:
+                matched_lead_id = lead["id"]
 
-        cur.execute("""
-            INSERT INTO carrier_inbound_events (lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload)
-            VALUES (%s, %s, %s, %s, %s, %s, %s);
-        """, (matched_id, payload.carrier_name, payload.vertical, payload.decision, float(payload.payout_offered), payload.resolution_notes, json.dumps(payload.raw_metadata)))
+        audit_query = """
+        INSERT INTO carrier_inbound_events (
+            lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s);
+        """
+        cur.execute(audit_query, (
+            matched_lead_id,
+            payload.carrier_name,
+            payload.vertical,
+            payload.decision,
+            float(payload.payout_offered),
+            payload.resolution_notes,
+            json.dumps(payload.raw_metadata)
+        ))
 
-        if matched_id and payload.decision == "approved" and payload.payout_offered > 0:
-            rec = payload.payout_offered
-            fee = (rec * Decimal("0.25")).quantize(Decimal("0.01"))
-            cur.execute("UPDATE leads SET status='settled', recovery_amount=%s, fee_collected=%s, updated_at=NOW() WHERE id::text=%s;", (rec, fee, matched_id))
-            bg.add_task(notify_claim_event, matched_id, "settlement_alert")
+        if matched_lead_id:
+            if payload.decision == "approved" and payload.payout_offered > Decimal("0.00"):
+                recovery = payload.payout_offered
+                contingency_fee = (recovery * Decimal("0.25")).quantize(Decimal("0.01"))
+                
+                update_query = """
+                UPDATE leads
+                SET status = 'settled',
+                    recovery_amount = %s,
+                    fee_collected = %s,
+                    updated_at = NOW()
+                WHERE id::text = %s;
+                """
+                cur.execute(update_query, (recovery, contingency_fee, matched_lead_id))
+                background_tasks.add_task(notify_claim_event, matched_lead_id, "settlement_alert")
+
+            elif payload.decision == "rejected":
+                cur.execute(
+                    "UPDATE leads SET status = 'rejected', updated_at = NOW() WHERE id::text = %s;",
+                    (matched_lead_id,)
+                )
         conn.commit()
-    return {"status": "processed", "lead_matched": matched_id is not None, "lead_id": matched_id}
+
+    return {
+        "status": "processed",
+        "lead_matched": matched_lead_id is not None,
+        "lead_id": matched_lead_id,
+        "recorded_decision": payload.decision
+    }
