@@ -9,3 +9,4 @@ reportlab>=4.2.0
 requests>=2.32.0
 python-dotenv>=1.0.0
 twilio>=9.3.0
+resend>=2.4.0
