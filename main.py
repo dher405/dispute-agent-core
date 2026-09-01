@@ -179,10 +179,10 @@ def get_claim_tracking_status(lead_id: str):
                    incident_identifier, estimated_compensation, recovery_amount, regulatory_framework,
                    claimant_name, updated_at, created_at
             FROM leads
-            WHERE id::text = %s OR user_id = %s
+            WHERE id::text = %s
             LIMIT 1
             """,
-            (lead_id, lead_id)
+            (lead_id,)
         )
         row = cur.fetchone()
         cur.close()
@@ -240,10 +240,10 @@ def submit_authorized_claim(req: dict):
                 incident_date = %s,
                 digital_signature = %s,
                 updated_at = NOW()
-            WHERE id::text = %s OR user_id = %s
+            WHERE id::text = %s
             RETURNING *, id::text AS pk_id
             """,
-            (full_name, email, phone, address, pnr, flight_date, signature, lead_id, lead_id)
+            (full_name, email, phone, address, pnr, flight_date, signature, lead_id)
         )
         updated_lead = cur.fetchone()
         conn.commit()
@@ -314,10 +314,10 @@ def settle_claim(payload: dict):
                 recovery_amount = %s,
                 fee_collected = %s,
                 updated_at = NOW()
-            WHERE id::text = %s OR user_id = %s
+            WHERE id::text = %s
             RETURNING id::text AS lead_id, claimant_name, carrier_name
             """,
-            (settled_amount, contingency_fee, lead_id, lead_id)
+            (settled_amount, contingency_fee, lead_id)
         )
         updated = cur.fetchone()
         conn.commit()
