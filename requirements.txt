@@ -8,3 +8,4 @@ google-genai>=0.1.1
 reportlab>=4.2.0
 requests>=2.32.0
 python-dotenv>=1.0.0
+twilio>=9.3.0
