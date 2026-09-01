@@ -199,10 +199,10 @@ with st.sidebar:
     st.markdown(f"**Name:** {current_user['full_name']}")
     
     role_badge = {
-        "super_admin": "🔴 Super Admin",
+        "super_admin": "🔴 Super Admin (Full Control)",
         "claims_manager": "🟠 Claims Manager",
         "claims_agent": "🔵 Claims Agent",
-        "auditor": "🟢 Auditor"
+        "auditor": "🟢 Read-Only Auditor"
     }.get(user_role, user_role)
     st.markdown(f"**Role:** {role_badge}")
     
@@ -232,7 +232,7 @@ with st.sidebar:
             img_buf = io.BytesIO()
             img.save(img_buf, format="PNG")
             
-            st.image(img_buf.getvalue(), caption="Scan with Authenticator App")
+            st.image(img_buf.getvalue(), caption="Scan with Google Authenticator / Authy")
             st.code(totp_secret, language="text")
             
             verify_token = st.text_input("Enter 6-Digit Code to Activate", max_chars=6, key="act_2fa")
@@ -262,7 +262,8 @@ with st.sidebar:
         st.session_state.user_info = None
         st.rerun()
 
-tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue"]
+# Dynamic Tab Configuration
+tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue", "📖 Operations Manual"]
 if user_role == "super_admin":
     tab_titles.append("👥 User Administration")
 
@@ -271,7 +272,8 @@ tab_review = tabs[0]
 tab_active = tabs[1]
 tab_webhooks = tabs[2]
 tab_dlq = tabs[3]
-tab_users = tabs[4] if user_role == "super_admin" else None
+tab_manual = tabs[4]
+tab_users = tabs[5] if user_role == "super_admin" else None
 
 # --- TAB 1: INGESTION QUEUE ---
 with tab_review:
@@ -399,10 +401,83 @@ with tab_dlq:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 5: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
+# --- TAB 5: COMPREHENSIVE OPERATIONS & RBAC MANUAL ---
+with tab_manual:
+    st.header("📖 Dispute Agent Platform: Field Manual & RBAC Guide")
+    st.caption("Standard Operating Procedures, Statutory Frameworks, and Team Administration Guidelines.")
+
+    with st.expander("1. System Purpose & Plain-English Overview", expanded=True):
+        st.markdown("""
+        **What Dispute Agent Does:**
+        When corporations cause non-excludable consumer disruptions (e.g., flight delays, multi-day internet outages, withheld security deposits), statutory regulations mandate liquidated cash compensation or bill credits. 
+        
+        The Dispute Agent engine automatically:
+        1. **Identifies** public complaints on social platforms (e.g., Reddit).
+        2. **Evaluates** the legal violation and computes the owed compensation using Google Gemini.
+        3. **Engages** the affected consumer with a pre-written statutory assessment.
+        4. **Generates & Serves** formal demand letters (PDF) directly to airline and utility legal desks upon claimant digital opt-in.
+        5. **Reconciles** inbound carrier payout decisions and deducts a **25% contingency fee**.
+        """)
+
+    with st.expander("2. Supported Dispute Verticals & Statutory Laws", expanded=False):
+        st.markdown("""
+        * **✈️ Flight Disruptions (`flight_disruption`)**
+            * *US DOT 14 CFR Part 260*: Mandates automatic cash refunds for cancellations or significant delays (>3 hrs domestic, >6 hrs international) where alternative travel is declined.
+            * *UK261 / EU261*: Entitles passengers to flat monetary compensation (**€250 to €600**) for flight cancellations or delays exceeding 3 hours caused by operational/mechanical airline fault.
+        * **🌐 Telecom & ISP Outages (`isp_outage`)**
+            * *State Public Utility Commission (PUC) Tariffs & FCC Mandates*: Requires broadband providers (Comcast, AT&T, Charter) to issue prorated bill credits and service outage offsets for sustained downtime exceeding statutory thresholds (typically >4 to 24 hours).
+        * **🏠 Security Deposit Non-Compliance (`security_deposit`)**
+            * *State Residential Tenancy Acts (e.g., CRS 38-12-103)*: Landlords must return security deposits or provide an itemized list of deductions within 30 to 60 days. Failure to do so incurs strict liability penalties of **2x to 3x the deposit amount**.
+        * **⚖️ Active Class Action Restitution (`class_action`)**
+            * Matches qualified consumers against active FTC restitution funds and court-approved settlement claims pools.
+        """)
+
+    with st.expander("3. User Roles & Permission Hierarchy (RBAC)", expanded=True):
+        st.markdown("""
+        | Role Key | Role Name | System Capabilities & Permissions |
+        |---|---|---|
+        | `super_admin` | **Super Admin** | **Full System Authority.** Review queue, DLQ overrides, claim settlement, 2FA administration, and **User Administration** (creating logins, updating roles, resetting user 2FA). |
+        | `claims_manager` | **Claims Manager** | Review & approve incoming signals, edit outreach copy, inspect webhooks, and trigger manual re-dispatches on the Dead-Letter Queue (DLQ). *Cannot create or manage users.* |
+        | `claims_agent` | **Claims Agent** | Review incoming social signals, edit outreach fragments, and mark leads as approved or rejected. *Cannot access DLQ re-dispatch or user administration.* |
+        | `auditor` | **Auditor** | **Read-Only Access.** View active claim portfolios, fee ledgers, and carrier webhook logs. Cannot approve leads, dismiss claims, or alter configuration. |
+        """)
+
+    with st.expander("4. How to Administer Logins, Passwords & 2FA", expanded=False):
+        st.markdown("""
+        **To Provision a New Team Member (Super Admins Only):**
+        1. Click the **👥 User Administration** tab (visible only to `super_admin`).
+        2. Fill out the **Provision New User** form:
+           * Enter a lowercase `username` (e.g., `jdoe`).
+           * Enter their `Full Name` and a temporary password.
+           * Select their role based on the permission matrix above.
+        3. Click **Create User Account**. The password is encrypted with `bcrypt` directly into `dispute_db_f372`.
+
+        **Managing Roles & 2FA Resets:**
+        * In the right column under **Manage User Credentials**, select any user.
+        * To change their access level, pick a new role from the dropdown and click **Save Role**.
+        * If a user loses their phone or authenticator app, click **Reset 2FA for User**. Their two-factor authentication will be disabled, allowing them to sign in with their password and scan a new QR code.
+
+        **Personal 2FA Activation:**
+        * Every operator can secure their account in the **left sidebar** under **Two-Factor Security**.
+        * Expand **Enable 2FA Authenticator**, scan the QR code in Google Authenticator or 1Password, enter the 6-digit code, and click **Activate 2FA**.
+        """)
+
+    with st.expander("5. Resolving Failed Demands in the Dead-Letter Queue (DLQ)", expanded=False):
+        st.markdown("""
+        * When a carrier email fails to send (due to network timeout or SMTP rejection), `carrier_retry_worker.py` attempts exponential backoff retries ($2^1, 2^2, 2^3, 2^4, 2^5$ minutes).
+        * If 5 attempts fail, the claim enters the **⚠️ Dead-Letter Queue** tab as `dispatch_failed`.
+        * To resolve:
+          1. Go to the **Dead-Letter Queue** tab.
+          2. Inspect the recorded transmission error.
+          3. Click **🔄 Force Immediate Re-Dispatch** to reset the attempt counter and queue the demand letter for immediate re-transmission.
+        """)
+
+# --- TAB 6: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
 if tab_users and user_role == "super_admin":
     with tab_users:
         st.subheader("👥 User Management & Role-Based Access Control")
+        st.caption("Administer team members, assign operational roles, or provision credentials.")
+
         col_new_user, col_user_list = st.columns([1, 1.4])
 
         with col_new_user:
@@ -433,12 +508,12 @@ if tab_users and user_role == "super_admin":
                                     VALUES (%s, %s, %s, %s, FALSE, %s);
                                 """, (new_username, new_full_name, hashed, new_role, seed))
                             conn.close()
-                            st.success(f"User `{new_username}` created.")
+                            st.success(f"User `{new_username}` created successfully with role `{new_role}`.")
                             st.rerun()
                         except psycopg2.IntegrityError:
                             st.error(f"Username `{new_username}` already exists.")
                         except Exception as e:
-                            st.error(f"Error: {e}")
+                            st.error(f"Error creating user: {e}")
 
         with col_user_list:
             st.markdown("#### Active System Users")
@@ -450,6 +525,34 @@ if tab_users and user_role == "super_admin":
                 conn.close()
 
                 if all_users:
-                    st.dataframe(pd.DataFrame(all_users)[["username", "full_name", "role", "is_2fa_enabled", "is_active"]], use_container_width=True)
+                    df_users = pd.DataFrame(all_users)
+                    st.dataframe(df_users[["username", "full_name", "role", "is_2fa_enabled", "is_active"]], use_container_width=True)
+
+                    st.divider()
+                    st.markdown("#### Manage User Credentials")
+                    user_to_edit = st.selectbox("Select User", [u["username"] for u in all_users if u["username"] != current_user["username"]])
+                    if user_to_edit:
+                        u_data = next(u for u in all_users if u["username"] == user_to_edit)
+                        
+                        col_u1, col_u2 = st.columns(2)
+                        with col_u1:
+                            new_assigned_role = st.selectbox("Update Role", ["claims_agent", "claims_manager", "auditor", "super_admin"], index=["claims_agent", "claims_manager", "auditor", "super_admin"].index(u_data["role"]))
+                            if st.button(f"Save Role for {user_to_edit}"):
+                                conn = get_db()
+                                with conn.cursor() as cur:
+                                    cur.execute("UPDATE admin_users SET role = %s, updated_at = NOW() WHERE username = %s;", (new_assigned_role, user_to_edit))
+                                conn.close()
+                                st.success("Role updated.")
+                                st.rerun()
+
+                        with col_u2:
+                            if st.button(f"Reset 2FA for {user_to_edit}"):
+                                new_seed = pyotp.random_base32()
+                                conn = get_db()
+                                with conn.cursor() as cur:
+                                    cur.execute("UPDATE admin_users SET is_2fa_enabled = FALSE, totp_secret = %s, updated_at = NOW() WHERE id = %s;", (new_seed, u_data["id"]))
+                                conn.close()
+                                st.warning(f"2FA disabled and reset for `{user_to_edit}`.")
+                                st.rerun()
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Error fetching users: {e}")
