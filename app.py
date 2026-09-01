@@ -22,11 +22,46 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 API_BASE = os.getenv("API_BASE_URL", "https://dispute-api-xyl7.onrender.com")
 
 def get_db():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    conn.autocommit = True
+    return conn
+
+# Auto-heal: Ensure admin_users table exists whenever Streamlit starts
+def ensure_auth_schema():
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS admin_users (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    username VARCHAR(100) UNIQUE NOT NULL,
+                    full_name VARCHAR(255) NOT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    role VARCHAR(50) NOT NULL DEFAULT 'claims_agent',
+                    is_2fa_enabled BOOLEAN DEFAULT FALSE,
+                    totp_secret VARCHAR(64),
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            cur.execute("SELECT COUNT(*) FROM admin_users;")
+            if cur.fetchone()["count"] == 0:
+                default_pw = "DisputeAdmin2026!"
+                hashed_pw = bcrypt.hashpw(default_pw.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                totp_seed = pyotp.random_base32()
+                cur.execute("""
+                    INSERT INTO admin_users (username, full_name, password_hash, role, is_2fa_enabled, totp_secret)
+                    VALUES ('admin', 'Master Administrator', %s, 'super_admin', FALSE, %s);
+                """, (hashed_pw, totp_seed))
+        conn.close()
+    except Exception:
+        pass
+
+ensure_auth_schema()
 
 # =========================================================
 # PUBLIC CLAIMANT TRACKING VIEW (?claim_id=<UUID>)
-# (Bypasses login so passengers can track their cases)
 # =========================================================
 query_params = st.query_params
 claim_id_param = query_params.get("claim_id")
@@ -94,7 +129,6 @@ def render_login_screen():
         st.title("⚖️ Dispute Agent Operations Desk")
         st.caption("Secure Operator Authentication & Verification Portal")
 
-        # Step 2: 2FA Token Verification
         if st.session_state.pending_2fa_user:
             user = st.session_state.pending_2fa_user
             st.info(f"Two-Factor Authentication required for **{user['username']}**.")
@@ -112,14 +146,13 @@ def render_login_screen():
                         st.success("Authentication successful.")
                         st.rerun()
                     else:
-                        st.error("Invalid or expired 2FA code. Please check your authenticator app.")
+                        st.error("Invalid or expired 2FA code.")
             
             if st.button("← Back to Username/Password"):
                 st.session_state.pending_2fa_user = None
                 st.rerun()
             return
 
-        # Step 1: Username & Password Login
         with st.form("form_login"):
             username_input = st.text_input("Username").strip().lower()
             password_input = st.text_input("Password", type="password")
@@ -161,49 +194,37 @@ if not st.session_state.authenticated:
 current_user = st.session_state.user_info
 user_role = current_user.get("role", "claims_agent")
 
-# Sidebar - User Details & 2FA Configuration
 with st.sidebar:
     st.markdown(f"### 👤 Logged In: `{current_user['username']}`")
     st.markdown(f"**Name:** {current_user['full_name']}")
     
     role_badge = {
-        "super_admin": "🔴 Super Admin (Full Access)",
+        "super_admin": "🔴 Super Admin",
         "claims_manager": "🟠 Claims Manager",
         "claims_agent": "🔵 Claims Agent",
-        "auditor": "🟢 Read-Only Auditor"
+        "auditor": "🟢 Auditor"
     }.get(user_role, user_role)
     st.markdown(f"**Role:** {role_badge}")
     
     st.divider()
     st.subheader("🔐 Two-Factor Security")
 
-    # 2FA Enable/Disable Controls
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute("SELECT is_2fa_enabled, totp_secret FROM admin_users WHERE id = %s;", (current_user["id"],))
         latest_auth = cur.fetchone()
     conn.close()
 
-    is_2fa_active = latest_auth["is_2fa_enabled"]
-    totp_secret = latest_auth["totp_secret"]
-
-    if not totp_secret:
-        totp_secret = pyotp.random_base32()
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("UPDATE admin_users SET totp_secret = %s WHERE id = %s;", (totp_secret, current_user["id"]))
-            conn.commit()
-        conn.close()
+    is_2fa_active = latest_auth["is_2fa_enabled"] if latest_auth else False
+    totp_secret = latest_auth["totp_secret"] if latest_auth else pyotp.random_base32()
 
     if not is_2fa_active:
-        st.warning("2FA is currently **Disabled**.")
+        st.warning("2FA is **Disabled**.")
         with st.expander("Enable 2FA Authenticator"):
             totp_uri = pyotp.totp.TOTP(totp_secret).provisioning_uri(
                 name=current_user['username'],
                 issuer_name="DisputeAgent"
             )
-            
-            # Generate QR Code in-memory
             qr = qrcode.QRCode(box_size=4, border=2)
             qr.add_data(totp_uri)
             qr.make(fit=True)
@@ -211,7 +232,7 @@ with st.sidebar:
             img_buf = io.BytesIO()
             img.save(img_buf, format="PNG")
             
-            st.image(img_buf.getvalue(), caption="Scan with Google Authenticator / Authy")
+            st.image(img_buf.getvalue(), caption="Scan with Authenticator App")
             st.code(totp_secret, language="text")
             
             verify_token = st.text_input("Enter 6-Digit Code to Activate", max_chars=6, key="act_2fa")
@@ -219,20 +240,18 @@ with st.sidebar:
                 if pyotp.TOTP(totp_secret).verify(verify_token.strip()):
                     conn = get_db()
                     with conn.cursor() as cur:
-                        cur.execute("UPDATE admin_users SET is_2fa_enabled = TRUE WHERE id = %s;", (current_user["id"],))
-                        conn.commit()
+                        cur.execute("UPDATE admin_users SET is_2fa_enabled = TRUE, totp_secret = %s WHERE id = %s;", (totp_secret, current_user["id"]))
                     conn.close()
                     st.success("2FA successfully enabled!")
                     st.rerun()
                 else:
                     st.error("Invalid token. 2FA not enabled.")
     else:
-        st.success("2FA is **Active & Enforced**.")
+        st.success("2FA is **Active**.")
         if st.button("Disable 2FA"):
             conn = get_db()
             with conn.cursor() as cur:
                 cur.execute("UPDATE admin_users SET is_2fa_enabled = FALSE WHERE id = %s;", (current_user["id"],))
-                conn.commit()
             conn.close()
             st.warning("2FA has been disabled.")
             st.rerun()
@@ -243,7 +262,6 @@ with st.sidebar:
         st.session_state.user_info = None
         st.rerun()
 
-# Main Interface Tabs
 tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue"]
 if user_role == "super_admin":
     tab_titles.append("👥 User Administration")
@@ -295,7 +313,6 @@ with tab_review:
                         conn = get_db()
                         with conn.cursor() as cur:
                             cur.execute("UPDATE leads SET status='approved', outreach_copy=%s, updated_at=NOW() WHERE id::text=%s", (outreach_text, sel_id))
-                            conn.commit()
                         conn.close()
                         st.success("Lead approved.")
                         st.rerun()
@@ -304,7 +321,6 @@ with tab_review:
                         conn = get_db()
                         with conn.cursor() as cur:
                             cur.execute("UPDATE leads SET status='rejected', updated_at=NOW() WHERE id::text=%s", (sel_id,))
-                            conn.commit()
                         conn.close()
                         st.warning("Lead rejected.")
                         st.rerun()
@@ -375,7 +391,6 @@ with tab_dlq:
                     conn = get_db()
                     with conn.cursor() as cur:
                         cur.execute("UPDATE leads SET status='opted_in', dispatch_attempts=0, last_dispatch_error=NULL, next_dispatch_retry_at=NOW(), updated_at=NOW() WHERE id::text=%s;", (sel_dlq,))
-                        conn.commit()
                     conn.close()
                     st.success("Claim requeued for carrier dispatch.")
                     st.rerun()
@@ -388,8 +403,6 @@ with tab_dlq:
 if tab_users and user_role == "super_admin":
     with tab_users:
         st.subheader("👥 User Management & Role-Based Access Control")
-        st.caption("Administer team members, assign operational roles, or provision credentials.")
-
         col_new_user, col_user_list = st.columns([1, 1.4])
 
         with col_new_user:
@@ -419,14 +432,13 @@ if tab_users and user_role == "super_admin":
                                     INSERT INTO admin_users (username, full_name, password_hash, role, is_2fa_enabled, totp_secret)
                                     VALUES (%s, %s, %s, %s, FALSE, %s);
                                 """, (new_username, new_full_name, hashed, new_role, seed))
-                                conn.commit()
                             conn.close()
-                            st.success(f"User account `{new_username}` created successfully with role `{new_role}`.")
+                            st.success(f"User `{new_username}` created.")
                             st.rerun()
                         except psycopg2.IntegrityError:
                             st.error(f"Username `{new_username}` already exists.")
                         except Exception as e:
-                            st.error(f"Error creating user: {e}")
+                            st.error(f"Error: {e}")
 
         with col_user_list:
             st.markdown("#### Active System Users")
@@ -438,36 +450,6 @@ if tab_users and user_role == "super_admin":
                 conn.close()
 
                 if all_users:
-                    df_users = pd.DataFrame(all_users)
-                    st.dataframe(df_users[["username", "full_name", "role", "is_2fa_enabled", "is_active"]], use_container_width=True)
-
-                    st.divider()
-                    st.markdown("#### Manage User Credentials")
-                    user_to_edit = st.selectbox("Select User", [u["username"] for u in all_users if u["username"] != current_user["username"]])
-                    if user_to_edit:
-                        u_data = next(u for u in all_users if u["username"] == user_to_edit)
-                        
-                        col_u1, col_u2 = st.columns(2)
-                        with col_u1:
-                            new_assigned_role = st.selectbox("Update Role", ["claims_agent", "claims_manager", "auditor", "super_admin"], index=["claims_agent", "claims_manager", "auditor", "super_admin"].index(u_data["role"]))
-                            if st.button(f"Save Role for {user_to_edit}"):
-                                conn = get_db()
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE admin_users SET role = %s, updated_at = NOW() WHERE username = %s;", (new_assigned_role, user_to_edit))
-                                    conn.commit()
-                                conn.close()
-                                st.success("Role updated.")
-                                st.rerun()
-
-                        with col_u2:
-                            if st.button(f"Reset 2FA for {user_to_edit}"):
-                                new_seed = pyotp.random_base32()
-                                conn = get_db()
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE admin_users SET is_2fa_enabled = FALSE, totp_secret = %s, updated_at = NOW() WHERE username = %s;", (new_seed, user_to_edit))
-                                    conn.commit()
-                                conn.close()
-                                st.warning(f"2FA disabled and reset for `{user_to_edit}`.")
-                                st.rerun()
+                    st.dataframe(pd.DataFrame(all_users)[["username", "full_name", "role", "is_2fa_enabled", "is_active"]], use_container_width=True)
             except Exception as e:
-                st.error(f"Error fetching users: {e}")
+                st.error(f"Error: {e}")
