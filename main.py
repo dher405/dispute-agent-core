@@ -45,7 +45,7 @@ if USE_NEW_SDK and GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 elif not USE_NEW_SDK and GEMINI_API_KEY:
     legacy_genai.configure(api_key=GEMINI_API_KEY)
-    ai_client = legacy_genai.GenerativeModel("gemini-1.5-flash")
+    ai_client = legacy_genai.GenerativeModel("gemini-3.6-flash")
 else:
     ai_client = None
 
@@ -131,7 +131,7 @@ def evaluate_lead(payload: dict):
 
     eval_data = None
     # Try models in order of availability
-    for model_name in ["gemini-2.5-flash", "gemini-1.5-flash"]:
+    for model_name in ["gemini-3.6-flash", "gemini-2.0-flash"]:
         try:
             if USE_NEW_SDK:
                 response = ai_client.models.generate_content(
