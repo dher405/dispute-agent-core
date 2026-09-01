@@ -1,295 +1,165 @@
-import requests
-from fastapi import Response
-from letter_generator import generate_demand_pdf
 import os
-import json
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr
+import threading
+from datetime import datetime
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import google.generativeai as genai
-import stripe
-from db import get_db_connection
+from google import genai
+from google.genai import types
 
-app = FastAPI(title="Autonomous Dispute & Claim Engine")
+from carrier_dispatcher import dispatch_demand_letter_email
+from sms_dispatcher import send_claim_confirmation_sms
 
-os.makedirs("static", exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app = FastAPI(title="Dispute Agent Core Engine", version="1.0.0")
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-3.6-flash")
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class SocialSignalIngest(BaseModel):
-    source_platform: str
-    username: str
-    user_id: str
-    post_url: str
-    post_text: str
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-class CustomerOptIn(BaseModel):
-    lead_id: str
-    full_name: str
-    email: EmailStr
-    phone: str
-    stripe_payment_method_id: str
-    consent_given: bool
+def get_db_connection():
+    if not DATABASE_URL:
+        return None
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        print(f"[DB ERROR] Connection failed: {e}", flush=True)
+        return None
 
-class InboundCustomerMessage(BaseModel):
-    lead_id: str
-    channel: str
-    sender: str
-    message_body: str
-
-class SettlementTrigger(BaseModel):
-    lead_id: str
-    actual_recovered_amount: float
+@app.on_event("startup")
+def startup_event():
+    import reddit_scraper
+    threading.Thread(target=reddit_scraper.poll_reddit_rss, daemon=True).start()
+    print("[POLISHER] Background Reddit poller thread started.", flush=True)
 
 @app.get("/")
-def home():
-    return {"status": "Dispute Resolution Engine Online"}
+def health_check():
+    return {"status": "online", "timestamp": str(datetime.utcnow())}
 
-@app.get("/claim", response_class=HTMLResponse)
-def serve_claim_portal():
-    return FileResponse("static/claim.html")
-
-@app.get("/api/v1/leads/{lead_id}")
-def get_lead_details(lead_id: str):
+@app.get("/api/v1/leads")
+def get_leads(status: str = "staged_for_review"):
     conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection unavailable")
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (lead_id,))
-            lead = cur.fetchone()
-            if not lead:
-                raise HTTPException(status_code=404, detail="Lead not found")
-            return lead
-    finally:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            SELECT id::text AS lead_id, *
+            FROM leads
+            WHERE status = %s
+            ORDER BY created_at DESC
+            """,
+            (status,)
+        )
+        leads = cur.fetchall()
+        cur.close()
         conn.close()
+        return leads
+    except Exception as e:
+        if conn:
+            conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/leads/evaluate")
-def evaluate_and_stage_lead(payload: SocialSignalIngest):
-    prompt = f"""
-    You are an automated legal dispute analyzer. Extract claim parameters from this social post:
-    \"{payload.post_text}\"
+def evaluate_lead(payload: dict):
+    post_text = payload.get("post_text", "")
+    user_id = payload.get("user_id", "")
+    username = payload.get("username", "")
+    post_url = payload.get("post_url", "")
+    platform = payload.get("source_platform", "reddit")
 
-    Output ONLY valid JSON matching this schema:
+    if not ai_client:
+        return {"status": "ignored", "reason": "Gemini API key not configured"}
+
+    prompt = f"""
+    Analyze this air travel post to determine if the passenger has a valid statutory cash claim:
+    Post: "{post_text}"
+
+    Rules:
+    - UK261/EU261: Flights departing EU/UK or operated by EU/UK airlines delayed >3 hours (mechanical/operational, not weather). Statutory value is £520 / €600 (~$650).
+    - US DOT 14 CFR Part 260: Significant delays/cancellations where carrier refused refund or duty of care.
+    - Montreal Convention: Baggage loss or documented consequential expenses.
+
+    Respond ONLY with JSON matching:
     {{
-      \"has_dispute_intent\": bool,
-      \"flight_number\": string or null,
-      \"airline\": string or null,
-      \"delay_hours\": float or null,
-      \"is_eligible\": bool,
-      \"estimated_recovery_usd\": float or null,
-      \"legal_basis\": string or null,
-      \"confidence_score\": float,
-      \"draft_outreach_reply\": string
+      "eligible": true/false,
+      "carrier": "Airline Name",
+      "flight_number": "e.g. UA 949",
+      "estimated_compensation": 650.00,
+      "statutory_basis": "UK261 / EU261 or 14 CFR Part 260",
+      "reasoning": "Brief explanation of statutory eligibility",
+      "outreach_copy": "Empathetic comment explaining passenger statutory right to compensation"
     }}
     """
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-    analysis = json.loads(response.text)
 
-    if not analysis.get("has_dispute_intent") or not analysis.get("is_eligible"):
+    try:
+        response = ai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        import json
+        eval_data = json.loads(response.text)
+    except Exception as err:
+        print(f"[EVAL ERROR] Gemini evaluation failed: {err}", flush=True)
+        return {"status": "ignored", "reason": "Evaluation parsing error"}
+
+    if not eval_data.get("eligible"):
         return {"status": "ignored", "reason": "Not eligible"}
 
     conn = get_db_connection()
+    if not conn:
+        return {"status": "ignored", "reason": "Database connection failed"}
+
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                INSERT INTO incidents (incident_type, identifier, metadata)
-                VALUES (%s, %s, %s)
-                RETURNING id;
-            """, ('flight_delay', f"{analysis.get('flight_number', 'UNKNOWN')}_{payload.source_platform}", json.dumps(analysis)))
-            incident_id = cur.fetchone()['id']
-
-            cur.execute("""
-                INSERT INTO leads (incident_id, source_platform, platform_user_id, platform_username, post_url, raw_post_text, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'staged_for_review')
-                RETURNING id;
-            """, (incident_id, payload.source_platform, payload.user_id, payload.username, payload.post_url, payload.post_text))
-            lead_id = cur.fetchone()['id']
-
-            cur.execute("""
-                INSERT INTO dispute_evaluations (lead_id, is_eligible, estimated_recovery_amount, governing_statute, ai_reasoning, outreach_copy_draft, confidence_score)
-                VALUES (%s, %s, %s, %s, %s, %s, %s);
-            """, (
-                lead_id,
-                analysis.get('is_eligible'),
-                analysis.get('estimated_recovery_usd'),
-                analysis.get('legal_basis'),
-                f"Extracted flight {analysis.get('flight_number')} with {analysis.get('delay_hours')}h delay.",
-                analysis.get('draft_outreach_reply'),
-                analysis.get('confidence_score')
-            ))
-
-            cur.execute("INSERT INTO lead_contacts (lead_id) VALUES (%s);", (lead_id,))
-            conn.commit()
-            return {"status": "staged", "lead_id": str(lead_id), "recovery_amount": analysis.get("estimated_recovery_usd")}
-    finally:
-        conn.close()
-
-@app.post("/api/v1/claim/opt-in")
-def register_customer_opt_in(payload: CustomerOptIn):
-    if not payload.consent_given:
-        raise HTTPException(status_code=400, detail="Consent is required.")
-
-    customer_id = None
-    if stripe.api_key and payload.stripe_payment_method_id != "pm_card_mock":
-        try:
-            customer = stripe.Customer.create(
-                email=payload.email,
-                name=payload.full_name,
-                payment_method=payload.stripe_payment_method_id,
-                invoice_settings={"default_payment_method": payload.stripe_payment_method_id}
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """
+            INSERT INTO leads (
+                source_platform, username, user_id, post_url, raw_post_text,
+                carrier_name, incident_identifier, estimated_compensation,
+                regulatory_framework, ai_reasoning, outreach_copy, status, created_at, updated_at
             )
-            customer_id = customer.id
-        except Exception:
-            customer_id = "cus_mock_fallback"
-    else:
-        customer_id = "cus_mock_local"
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE lead_contacts
-                SET full_name = %s,
-                    email = %s,
-                    phone = %s,
-                    stripe_customer_id = %s,
-                    stripe_payment_method_id = %s,
-                    consent_obtained = TRUE,
-                    consent_timestamp = NOW()
-                WHERE (id::text = %s);
-            """, (payload.full_name, payload.email, payload.phone, customer_id, payload.stripe_payment_method_id, payload.lead_id))
-
-            cur.execute("UPDATE leads SET status = 'opted_in' WHERE id = %s;", (payload.lead_id,))
-            conn.commit()
-        return {"status": "success", "message": "Claim onboarded."}
-    finally:
-        conn.close()
-
-@app.post("/api/v1/communication/inbound-webhook")
-def handle_customer_inbound_message(payload: InboundCustomerMessage):
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (payload.lead_id,))
-            case_data = cur.fetchone()
-
-        if not case_data:
-            raise HTTPException(status_code=404, detail="Case context not found")
-
-        ai_prompt = f"""
-        You are an autonomous dispute advocate resolving a case for {case_data['full_name']}.
-        Case Info: Incident {case_data['incident_identifier']}, Statute: {case_data['governing_statute']}, Current Status: {case_data['status']}.
-        Customer message: \"{payload.message_body}\"
-
-        Draft a concise, supportive, and professional response. Remind them our 25% contingency fee applies only after carrier payout.
-        """
-        response = model.generate_content(ai_prompt)
-        return {"status": "replied", "ai_response": response.text}
-    finally:
-        conn.close()
-
-@app.post("/api/v1/monetization/settle")
-def settle_contingency_commission(payload: SettlementTrigger):
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (payload.lead_id,))
-            lead = cur.fetchone()
-            if not lead:
-                raise HTTPException(status_code=404, detail="Lead not found.")
-
-            fee_pct = float(lead['fee_percentage'] or 25.0)
-            charge_amount = round(payload.actual_recovered_amount * (fee_pct / 100.0), 2)
-            charge_amount_cents = int(charge_amount * 100)
-
-            payment_intent_id = "pi_mock_success"
-            if stripe.api_key and lead['stripe_customer_id'] and not lead['stripe_customer_id'].startswith("cus_mock"):
-                intent = stripe.PaymentIntent.create(
-                    amount=charge_amount_cents,
-                    currency="usd",
-                    customer=lead['stripe_customer_id'],
-                    payment_method=lead['stripe_payment_method_id'],
-                    off_session=True,
-                    confirm=True,
-                    description=f"Contingency fee ({fee_pct}%) for settled claim {payload.lead_id}"
-                )
-                payment_intent_id = intent.id
-
-            cur.execute("UPDATE lead_contacts SET fee_charged_amount = %s, stripe_payment_intent_id = %s WHERE (id::text = %s);", (charge_amount, payment_intent_id, payload.lead_id))
-            cur.execute("UPDATE leads SET status = 'won' WHERE id = %s;", (payload.lead_id,))
-            conn.commit()
-
-            return {
-                "status": "settled",
-                "recovered_amount": payload.actual_recovered_amount,
-                "fee_collected": charge_amount,
-                "stripe_payment_intent": payment_intent_id
-            }
-    finally:
-        conn.close()
-
-import asyncio
-from worker import dispatch_approved_outreach
-
-@app.on_event("startup")
-async def start_background_dispatcher():
-    async def dispatcher_loop():
-        while True:
-            try:
-                dispatch_approved_outreach()
-            except Exception as e:
-                print(f"[WORKER LOOP ERROR] {e}")
-            await asyncio.sleep(60) # Run every 60 seconds
-
-    asyncio.create_task(dispatcher_loop())
-
-@app.get("/api/v1/claims/{lead_id}/generate-letter")
-def download_demand_letter(lead_id: str):
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM v_staged_leads_for_review WHERE (id::text = %s);", (lead_id,))
-            claim = cur.fetchone()
-            if not claim:
-                raise HTTPException(status_code=404, detail="Claim not found")
-
-        pdf_bytes = generate_demand_pdf(dict(claim))
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename=demand_letter_{lead_id}.pdf"}
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review', NOW(), NOW())
+            ON CONFLICT (user_id) DO UPDATE
+            SET status = 'staged_for_review', updated_at = NOW()
+            RETURNING id::text AS lead_id
+            """,
+            (
+                platform, username, user_id, post_url, post_text,
+                eval_data.get("carrier"), eval_data.get("flight_number"),
+                eval_data.get("estimated_compensation", 650.0),
+                eval_data.get("statutory_basis"), eval_data.get("reasoning"),
+                eval_data.get("outreach_copy")
+            )
         )
-    finally:
+        inserted = cur.fetchone()
+        conn.commit()
+        cur.close()
         conn.close()
 
-from reddit_scraper import poll_reddit_rss
-
-@app.on_event("startup")
-async def start_reddit_poller():
-    import threading
-    t = threading.Thread(target=poll_reddit_rss, daemon=True)
-    t.start()
-    print("[POLISHER] Background Reddit poller thread started.", flush=True)
-
-
-@app.get("/api/v1/system/egress-ip")
-def get_egress_ip():
-    proxies = {
-        "http": "socks5h://localhost:1055",
-        "https": "socks5h://localhost:1055"
-    } if os.path.exists("/tmp/ts-run/tailscaled.sock") else None
-
-    try:
-        res = requests.get("https://api.ipify.org?format=json", proxies=proxies, timeout=10)
-        return {"mode": "proxied" if proxies else "direct", "egress_ip": res.json().get("ip")}
+        lead_id = inserted["lead_id"] if inserted else user_id
+        return {
+            "status": "staged",
+            "lead_id": lead_id,
+            "recovery_amount": float(eval_data.get("estimated_compensation", 650.0))
+        }
     except Exception as e:
-        return {"error": str(e)}
-
+        if conn:
+            conn.close()
+        print(f"[DB INSERT ERROR] {e}", flush=True)
+        return {"status": "ignored", "reason": str(e)}
 
 @app.get("/api/v1/claims/track/{lead_id}")
 def get_claim_tracking_status(lead_id: str):
@@ -300,27 +170,29 @@ def get_claim_tracking_status(lead_id: str):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
             """
-            SELECT id AS lead_id, status, source_platform, carrier_name, 
-                   incident_identifier, estimated_compensation, regulatory_framework,
+            SELECT id::text AS lead_id, status, source_platform, carrier_name, 
+                   incident_identifier, estimated_compensation, recovery_amount, regulatory_framework,
                    claimant_name, updated_at, created_at
             FROM leads
-            WHERE (id::text = %s)
+            WHERE id::text = %s OR user_id = %s
+            LIMIT 1
             """,
-            (lead_id,)
+            (lead_id, lead_id)
         )
         row = cur.fetchone()
         cur.close()
         conn.close()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Claim not found")
+            raise HTTPException(status_code=404, detail="Claim record not found")
 
+        amount = float(row.get("recovery_amount") or row.get("estimated_compensation") or 0.0)
         return {
             "lead_id": row.get("lead_id"),
             "status": row.get("status"),
             "carrier": row.get("carrier_name") or "Airline Carrier",
             "flight": row.get("incident_identifier") or "Disrupted Flight",
-            "amount": float(row.get("estimated_compensation") or 0.0),
+            "amount": amount,
             "statute": row.get("regulatory_framework") or "14 CFR Part 260 / Montreal Convention",
             "name": row.get("claimant_name") or "Authorized Passenger",
             "last_updated": str(row.get("updated_at") or row.get("created_at"))
@@ -328,8 +200,8 @@ def get_claim_tracking_status(lead_id: str):
     except Exception as e:
         if conn:
             conn.close()
+        print(f"[TRACK ERROR] {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/v1/claims/submit")
 def submit_authorized_claim(req: dict):
@@ -363,10 +235,10 @@ def submit_authorized_claim(req: dict):
                 incident_date = %s,
                 digital_signature = %s,
                 updated_at = NOW()
-            WHERE (id::text = %s)
-            RETURNING *
+            WHERE id::text = %s OR user_id = %s
+            RETURNING *, id::text AS pk_id
             """,
-            (full_name, email, phone, address, pnr, flight_date, signature, lead_id)
+            (full_name, email, phone, address, pnr, flight_date, signature, lead_id, lead_id)
         )
         updated_lead = cur.fetchone()
         conn.commit()
@@ -376,7 +248,6 @@ def submit_authorized_claim(req: dict):
         if not updated_lead:
             raise HTTPException(status_code=404, detail="Lead ID not found in database")
 
-        # Auto-dispatch email package to carrier
         claim_payload = {
             "lead_id": lead_id,
             "full_name": full_name,
@@ -392,24 +263,19 @@ def submit_authorized_claim(req: dict):
         }
         
         try:
-            from carrier_dispatcher import dispatch_demand_letter_email
-            import threading
             threading.Thread(target=dispatch_demand_letter_email, args=(claim_payload,), daemon=True).start()
         except Exception as e:
-            print(f"[DISPATCH ERROR] Could not trigger email dispatch: {e}", flush=True)
+            print(f"[DISPATCH ERROR] {e}", flush=True)
 
-        # Auto-dispatch SMS receipt via Twilio
         if phone:
             try:
-                from sms_dispatcher import send_claim_confirmation_sms
-                import threading
                 threading.Thread(
                     target=send_claim_confirmation_sms,
                     args=(phone, full_name, claim_payload["incident_identifier"], lead_id, claim_payload["claimed_amount"]),
                     daemon=True
                 ).start()
             except Exception as e:
-                print(f"[SMS ERROR] Could not trigger SMS dispatch: {e}", flush=True)
+                print(f"[SMS ERROR] {e}", flush=True)
 
         return {
             "status": "success",
@@ -421,7 +287,6 @@ def submit_authorized_claim(req: dict):
         if conn:
             conn.close()
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/api/v1/claims/settle")
 def settle_claim(payload: dict):
@@ -444,8 +309,8 @@ def settle_claim(payload: dict):
                 recovery_amount = %s,
                 fee_collected = %s,
                 updated_at = NOW()
-            WHERE id::text = %s
-            RETURNING id, claimant_name, carrier_name
+            WHERE id::text = %s OR user_id = %s
+            RETURNING id::text AS lead_id, claimant_name, carrier_name
             """,
             (settled_amount, contingency_fee, lead_id, lead_id)
         )
