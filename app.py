@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="Dispute Agent | Operations & Claims Desk",
+    page_title="Dispute Agent | Claims & Operations Desk",
     page_icon="⚖️",
     layout="wide"
 )
@@ -27,7 +27,7 @@ def get_db():
     return conn
 
 def ensure_database_schema():
-    """Auto-heals missing columns and authentication tables on app startup."""
+    """Auto-heals missing tables and columns on startup."""
     try:
         conn = get_db()
         with conn.cursor() as cur:
@@ -53,6 +53,15 @@ def ensure_database_schema():
                     totp_secret VARCHAR(64),
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    category VARCHAR(50) NOT NULL,
+                    description TEXT,
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
@@ -97,12 +106,13 @@ if claim_id_param:
             c3.metric("Statutory Valuation", f"${est_comp:.2f}")
             c4.metric("Current Status", status.replace("_", " ").upper())
 
+            # SCENARIO A: INTAKE & DIGITAL OPT-IN FORM
             if status in ("staged_for_review", "approved", "contacted"):
                 st.subheader("📋 Complete Your Representation Authorization")
                 st.info(
-                    f"**Statutory Basis:** {claim.get('regulatory_framework', 'Consumer Protection Mandates')}\n\n"
+                    f"**Statutory Legal Basis:** {claim.get('regulatory_framework', 'Consumer Protection Mandates')}\n\n"
                     "Dispute Agent operates on a **100% No-Win, No-Fee contingency basis**. "
-                    "There are **$0 upfront costs**. Upon successful recovery, our standard platform contingency fee is **25%** of the settled amount."
+                    "There are **$0 upfront costs**. Upon successful settlement, our platform contingency fee is **25%** of the recovered amount."
                 )
 
                 with st.form("form_claimant_optin"):
@@ -112,7 +122,7 @@ if claim_id_param:
                         c_name = st.text_input("Full Legal Name *", placeholder="Jane Doe")
                         c_email = st.text_input("Email Address (for demand copies) *", placeholder="jane@example.com")
                     with col_u2:
-                        c_phone = st.text_input("Mobile Phone (for real-time SMS status alerts) *", placeholder="+13035550199")
+                        c_phone = st.text_input("Mobile Phone (for instant SMS status alerts) *", placeholder="+13035550199")
                         c_address = st.text_input("Mailing Address *", placeholder="123 Main St, Denver, CO 80202")
 
                     st.markdown("#### 2. Incident & Account Verification")
@@ -162,6 +172,8 @@ if claim_id_param:
                                     st.rerun()
                                 else:
                                     st.error(f"Error submitting authorization: {sub_res.text}")
+
+            # SCENARIO B: ACTIVE TRACKING VIEW
             else:
                 st.subheader("Dispute Resolution Progress")
                 steps = ["Authorized", "Demand Dispatched to Legal", "Settlement Reconciled"]
@@ -194,7 +206,7 @@ if claim_id_param:
     st.stop()
 
 # =====================================================================
-# AUTHENTICATION & OPERATOR DESK (Standard Admin View)
+# AUTHENTICATION & OPERATOR DESK
 # =====================================================================
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -259,7 +271,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # =====================================================================
-# AUTHENTICATED OPERATOR TABS
+# AUTHENTICATED OPERATOR DESK
 # =====================================================================
 current_user = st.session_state.user_info
 user_role = current_user.get("role", "claims_agent")
@@ -269,6 +281,66 @@ with st.sidebar:
     st.markdown(f"**Name:** {current_user['full_name']}")
     st.markdown(f"**Role:** {user_role.replace('_', ' ').title()}")
     st.divider()
+
+    # Dynamic Vendor Integrations Panel (Super Admin Only)
+    if user_role == "super_admin":
+        st.subheader("⚙️ Vendor & Service Integrations")
+        with st.expander("Configure 3rd Party APIs"):
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, value, category, description FROM system_settings ORDER BY category, key;")
+                settings_rows = cur.fetchall()
+            conn.close()
+
+            settings_dict = {row["key"]: row["value"] for row in settings_rows}
+
+            st.markdown("**Twilio SMS Gateway**")
+            new_tw_sid = st.text_input("Twilio Account SID", value=settings_dict.get("TWILIO_ACCOUNT_SID", ""))
+            new_tw_token = st.text_input("Twilio Auth Token", value=settings_dict.get("TWILIO_AUTH_TOKEN", ""), type="password")
+            new_tw_phone = st.text_input("Twilio Phone Number", value=settings_dict.get("TWILIO_PHONE_NUMBER", ""))
+
+            st.markdown("**Stripe Payouts & Settlement**")
+            new_st_sec = st.text_input("Stripe Secret Key", value=settings_dict.get("STRIPE_SECRET_KEY", ""), type="password")
+            new_st_pub = st.text_input("Stripe Publishable Key", value=settings_dict.get("STRIPE_PUBLISHABLE_KEY", ""))
+
+            st.markdown("**Carrier Demand SMTP Email**")
+            new_smtp_host = st.text_input("SMTP Host", value=settings_dict.get("SMTP_HOST", "smtp.gmail.com"))
+            new_smtp_port = st.text_input("SMTP Port", value=settings_dict.get("SMTP_PORT", "587"))
+            new_smtp_user = st.text_input("SMTP User / Email", value=settings_dict.get("SMTP_USER", ""))
+            new_smtp_pass = st.text_input("SMTP Password", value=settings_dict.get("SMTP_PASS", ""), type="password")
+
+            st.markdown("**Social Ingestion Monitoring**")
+            new_subs = st.text_area("Monitored Subreddits (comma separated)", value=settings_dict.get("MONITORED_SUBREDDITS", ""))
+            new_poll = st.text_input("Poll Cadence (seconds)", value=settings_dict.get("POLL_INTERVAL_SECONDS", "60"))
+
+            if st.button("💾 Save Integration Settings"):
+                conn = get_db()
+                with conn.cursor() as cur:
+                    updates = [
+                        ("TWILIO_ACCOUNT_SID", new_tw_sid, "twilio"),
+                        ("TWILIO_AUTH_TOKEN", new_tw_token, "twilio"),
+                        ("TWILIO_PHONE_NUMBER", new_tw_phone, "twilio"),
+                        ("STRIPE_SECRET_KEY", new_st_sec, "stripe"),
+                        ("STRIPE_PUBLISHABLE_KEY", new_st_pub, "stripe"),
+                        ("SMTP_HOST", new_smtp_host, "smtp"),
+                        ("SMTP_PORT", new_smtp_port, "smtp"),
+                        ("SMTP_USER", new_smtp_user, "smtp"),
+                        ("SMTP_PASS", new_smtp_pass, "smtp"),
+                        ("MONITORED_SUBREDDITS", new_subs, "monitoring"),
+                        ("POLL_INTERVAL_SECONDS", new_poll, "monitoring")
+                    ]
+                    for k, val, cat in updates:
+                        cur.execute("""
+                            INSERT INTO system_settings (key, value, category, updated_at)
+                            VALUES (%s, %s, %s, NOW())
+                            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+                        """, (k, val, cat))
+                conn.close()
+                st.success("Integration settings saved to database!")
+                st.rerun()
+
+        st.divider()
+
     if st.button("🚪 Sign Out"):
         st.session_state.authenticated = False
         st.session_state.user_info = None
@@ -280,7 +352,7 @@ if user_role == "super_admin":
 
 tabs = st.tabs(tab_titles)
 
-# --- TAB 0: INGESTION QUEUE (RESTORED SELECTION & APPROVAL CONTROLS) ---
+# --- TAB 0: INGESTION QUEUE ---
 with tabs[0]:
     st.subheader("Staged Consumer Signals")
     vertical_filter = st.selectbox(
@@ -324,7 +396,6 @@ with tabs[0]:
                 claim_auth_link = f"https://dispute-admin.onrender.com/?claim_id={selected_lead_id}"
                 default_copy = selected_lead.get("outreach_copy") or ""
                 
-                # Ensure the outreach text includes the claimant link
                 if claim_auth_link not in default_copy:
                     full_outreach_proposal = f"{default_copy} Authorize representation and claim your restitution here: {claim_auth_link}".strip()
                 else:
@@ -459,7 +530,7 @@ with tabs[4]:
         """)
     with st.expander("3. Role Permissions (RBAC)", expanded=False):
         st.markdown("""
-        * `super_admin`: Full authority, claim actions, DLQ overrides, and User Administration.
+        * `super_admin`: Full authority, claim actions, DLQ overrides, Vendor configuration, and User Administration.
         * `claims_manager`: Review queue, approvals, and DLQ re-dispatch actions.
         * `claims_agent`: Review and approve/reject social signals.
         * `auditor`: Read-only access to portfolio ledgers and webhook telemetry.
@@ -469,9 +540,51 @@ with tabs[4]:
 if user_role == "super_admin" and len(tabs) > 5:
     with tabs[5]:
         st.subheader("👥 User Management & Role Provisioning")
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id::text AS id, username, full_name, role, is_2fa_enabled, is_active FROM admin_users ORDER BY created_at ASC;")
-            users = cur.fetchall()
-        conn.close()
-        st.dataframe(pd.DataFrame(users))
+        col_new_user, col_user_list = st.columns([1, 1.4])
+
+        with col_new_user:
+            st.markdown("#### Provision New User")
+            with st.form("form_create_user"):
+                new_username = st.text_input("Username").strip().lower()
+                new_full_name = st.text_input("Full Name")
+                new_password = st.text_input("Temporary Password", type="password")
+                new_role = st.selectbox("Assign Role", [
+                    ("claims_agent", "Claims Agent (Queue Review & Outreach)"),
+                    ("claims_manager", "Claims Manager (Queue & DLQ Control)"),
+                    ("auditor", "Auditor (Read-Only Telemetry)"),
+                    ("super_admin", "Super Admin (Full Access & User Admin)")
+                ], format_func=lambda x: x[1])[0]
+
+                if st.form_submit_button("Create User Account"):
+                    if not new_username or not new_password or not new_full_name:
+                        st.error("All fields are required.")
+                    else:
+                        try:
+                            hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                            seed = pyotp.random_base32()
+                            conn = get_db()
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    INSERT INTO admin_users (username, full_name, password_hash, role, is_2fa_enabled, totp_secret)
+                                    VALUES (%s, %s, %s, %s, FALSE, %s);
+                                """, (new_username, new_full_name, hashed, new_role, seed))
+                            conn.close()
+                            st.success(f"User `{new_username}` created.")
+                            st.rerun()
+                        except psycopg2.IntegrityError:
+                            st.error(f"Username `{new_username}` already exists.")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+        with col_user_list:
+            st.markdown("#### Active System Users")
+            try:
+                conn = get_db()
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id::text AS id, username, full_name, role, is_2fa_enabled, is_active, created_at FROM admin_users ORDER BY created_at ASC;")
+                    all_users = cur.fetchall()
+                conn.close()
+                if all_users:
+                    st.dataframe(pd.DataFrame(all_users)[["username", "full_name", "role", "is_2fa_enabled", "is_active"]])
+            except Exception as e:
+                st.error(f"Error: {e}")
