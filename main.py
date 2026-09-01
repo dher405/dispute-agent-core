@@ -5,8 +5,13 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+    USE_MODERN_SDK = True
+except ImportError:
+    import google.generativeai as legacy_genai
+    USE_MODERN_SDK = False
 
 from carrier_dispatcher import dispatch_demand_letter_email
 from sms_dispatcher import send_claim_confirmation_sms
