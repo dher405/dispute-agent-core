@@ -6,6 +6,7 @@ requests>=2.31.0
 pydantic>=2.6.0
 python-dotenv>=1.0.1
 feedparser>=6.0.11
+reportlab>=4.1.0
 google-genai>=0.1.1
 google-generativeai>=0.8.0
 resend>=0.8.0

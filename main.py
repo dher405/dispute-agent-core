@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-# Dual-SDK Import Strategy
+# Dual SDK fallback strategy
 try:
     from google import genai
     from google.genai import types
@@ -16,8 +16,17 @@ except ImportError:
     import google.generativeai as legacy_genai
     USE_NEW_SDK = False
 
-from carrier_dispatcher import dispatch_demand_letter_email
-from sms_dispatcher import send_claim_confirmation_sms
+try:
+    from carrier_dispatcher import dispatch_demand_letter_email
+except Exception as e:
+    print(f"[IMPORT WARNING] carrier_dispatcher disabled: {e}", flush=True)
+    dispatch_demand_letter_email = None
+
+try:
+    from sms_dispatcher import send_claim_confirmation_sms
+except Exception as e:
+    print(f"[IMPORT WARNING] sms_dispatcher disabled: {e}", flush=True)
+    send_claim_confirmation_sms = None
 
 app = FastAPI(title="Dispute Agent Core Engine", version="1.0.0")
 
@@ -54,17 +63,21 @@ def startup_event():
         threading.Thread(target=reddit_scraper.poll_reddit_rss, daemon=True).start()
         print("[POLISHER] Background Reddit poller thread started.", flush=True)
     except Exception as err:
-        print(f"[STARTUP ERROR] Could not start scraper: {err}", flush=True)
+        print(f"[STARTUP ERROR] Scraper start failure: {err}", flush=True)
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "timestamp": str(datetime.utcnow()), "sdk_version": "google-genai" if USE_NEW_SDK else "google-generativeai"}
+    return {
+        "status": "online",
+        "timestamp": str(datetime.utcnow()),
+        "sdk": "google-genai" if USE_NEW_SDK else "google-generativeai"
+    }
 
 @app.get("/api/v1/leads")
 def get_leads(status: str = "staged_for_review"):
     conn = get_db_connection()
     if not conn:
-        raise HTTPException(status_code=500, detail="Database connection unavailable")
+        raise HTTPException(status_code=500, detail="Database connection failed")
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
@@ -96,41 +109,50 @@ def evaluate_lead(payload: dict):
         return {"status": "ignored", "reason": "Gemini API key not configured"}
 
     prompt = f"""
-    Analyze this flight passenger disruption post for statutory eligibility:
-    Post text: "{post_text}"
+    Evaluate this passenger flight disruption post for statutory cash compensation eligibility:
+    Post: "{post_text}"
 
     Rules:
-    1. UK261 / EU261: Delays >= 3 hours or cancellations on flights departing UK/EU airports or operated by UK/EU airlines (mechanical/operational issues qualify; extraordinary weather does not). Value: £520 / €600 (~$650).
-    2. US DOT 14 CFR Part 260: Mandatory prompt cash refund for cancelled/significantly changed domestic flights (>3 hrs) or international flights (>6 hrs) when replacement travel was refused.
-    3. Montreal Convention: Baggage loss, damage, or delayed luggage expenses up to ~$1,700 (1,288 SDR).
+    1. UK261 / EU261: Flights departing UK/EU or operated by UK/EU airlines with delay >= 3 hours (mechanical/operational reasons, not weather). Value: £520 / €600 (~$650).
+    2. US DOT 14 CFR Part 260: Significant delays (>3h domestic, >6h intl) or cancellations where passenger refused alternate travel.
+    3. Montreal Convention: Delayed/damaged/lost baggage expenses.
 
-    Respond ONLY with a JSON object:
+    Respond ONLY with JSON matching:
     {{
       "eligible": true,
       "carrier": "Carrier Name",
       "flight_number": "e.g. UA 949",
       "estimated_compensation": 660.00,
       "statutory_basis": "UK261 / EU261 or 14 CFR Part 260",
-      "reasoning": "Clear statutory breakdown",
-      "outreach_copy": "Empathetic notice of statutory compensation"
+      "reasoning": "Clear explanation",
+      "outreach_copy": "Statutory demand outreach copy"
     }}
     """
 
-    try:
-        if USE_NEW_SDK:
-            response = ai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            eval_data = json.loads(response.text)
-        else:
-            response = ai_client.generate_content(prompt)
-            raw_txt = response.text.replace("```json", "").replace("```", "").strip()
-            eval_data = json.loads(raw_txt)
-    except Exception as err:
-        print(f"[EVAL ERROR] Gemini parsing failed: {err}", flush=True)
-        return {"status": "ignored", "reason": f"Evaluation error: {err}"}
+    eval_data = None
+    # Try models in order of availability
+    for model_name in ["gemini-2.5-flash", "gemini-1.5-flash"]:
+        try:
+            if USE_NEW_SDK:
+                response = ai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                eval_data = json.loads(response.text)
+            else:
+                legacy_model = legacy_genai.GenerativeModel(model_name)
+                response = legacy_model.generate_content(prompt)
+                raw_txt = response.text.replace("```json", "").replace("```", "").strip()
+                eval_data = json.loads(raw_txt)
+            if eval_data:
+                break
+        except Exception as err:
+            print(f"[MODEL RETRY] {model_name} failed: {err}", flush=True)
+            continue
+
+    if not eval_data:
+        return {"status": "ignored", "reason": "Evaluation model unreachable"}
 
     if not eval_data.get("eligible"):
         return {"status": "ignored", "reason": "Not eligible"}
@@ -279,12 +301,13 @@ def submit_authorized_claim(req: dict):
             "digital_signature": signature
         }
         
-        try:
-            threading.Thread(target=dispatch_demand_letter_email, args=(claim_payload,), daemon=True).start()
-        except Exception as e:
-            print(f"[DISPATCH ERROR] {e}", flush=True)
+        if dispatch_demand_letter_email:
+            try:
+                threading.Thread(target=dispatch_demand_letter_email, args=(claim_payload,), daemon=True).start()
+            except Exception as e:
+                print(f"[DISPATCH ERROR] {e}", flush=True)
 
-        if phone:
+        if phone and send_claim_confirmation_sms:
             try:
                 threading.Thread(
                     target=send_claim_confirmation_sms,
@@ -330,7 +353,7 @@ def settle_claim(payload: dict):
                 fee_collected = %s,
                 updated_at = NOW()
             WHERE id::text = %s
-            RETURNING id::text AS lead_id, claimant_name, carrier_name
+            RETURNING id::text AS lead_id, claimant_name
             """,
             (settled_amount, contingency_fee, lead_id)
         )
