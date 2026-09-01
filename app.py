@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="Dispute Agent | Claims & Recovery Portal",
+    page_title="Dispute Agent | Claims & Operations Desk",
     page_icon="⚖️",
     layout="wide"
 )
@@ -26,10 +26,25 @@ def get_db():
     conn.autocommit = True
     return conn
 
-def ensure_auth_schema():
+def ensure_database_schema():
+    """Auto-heals missing columns and authentication tables on app startup."""
     try:
         conn = get_db()
         with conn.cursor() as cur:
+            # 1. Ensure leads table has all operational columns
+            cur.execute("""
+                ALTER TABLE leads
+                ADD COLUMN IF NOT EXISTS vertical VARCHAR(50) DEFAULT 'flight_disruption',
+                ADD COLUMN IF NOT EXISTS account_number VARCHAR(100),
+                ADD COLUMN IF NOT EXISTS outage_duration_hours NUMERIC(6,2),
+                ADD COLUMN IF NOT EXISTS tier_speed_tier VARCHAR(100),
+                ADD COLUMN IF NOT EXISTS dispatch_attempts INT DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS last_dispatch_error TEXT,
+                ADD COLUMN IF NOT EXISTS last_dispatch_attempt_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS next_dispatch_retry_at TIMESTAMPTZ DEFAULT NOW();
+            """)
+            
+            # 2. Ensure admin_users exists and has master account
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS admin_users (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -57,7 +72,7 @@ def ensure_auth_schema():
     except Exception:
         pass
 
-ensure_auth_schema()
+ensure_database_schema()
 
 # =====================================================================
 # PUBLIC CLAIMANT INTAKE & TRACKING PORTAL (?claim_id=<UUID>)
@@ -78,7 +93,6 @@ if claim_id_param:
             carrier = claim.get("carrier_name") or "Service Provider"
             est_comp = float(claim.get("estimated_compensation") or 0.0)
 
-            # TOP METRICS BANNER
             st.divider()
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Dispute Vertical", vertical.replace("_", " ").title())
@@ -86,13 +100,12 @@ if claim_id_param:
             c3.metric("Statutory Valuation", f"${est_comp:.2f}")
             c4.metric("Current Status", status.replace("_", " ").upper())
 
-            # SCENARIO A: PENDING CONSUMER AUTHORIZATION
             if status in ("staged_for_review", "approved", "contacted"):
                 st.subheader("📋 Complete Your Representation Authorization")
                 st.info(
                     f"**Statutory Basis:** {claim.get('regulatory_framework', 'Consumer Protection Mandates')}\n\n"
                     "Dispute Agent operates on a **100% No-Win, No-Fee contingency basis**. "
-                    "There are **$0 upfront fees**. If we recover compensation on your behalf, our standard platform contingency fee is **25%** of the settled amount."
+                    "There are **$0 upfront costs**. Upon successful recovery, our standard platform contingency fee is **25%** of the settled amount."
                 )
 
                 with st.form("form_claimant_optin"):
@@ -152,8 +165,6 @@ if claim_id_param:
                                     st.rerun()
                                 else:
                                     st.error(f"Error submitting authorization: {sub_res.text}")
-
-            # SCENARIO B: ACTIVE TRACKING TIMELINE
             else:
                 st.subheader("Dispute Resolution Progress")
                 steps = ["Authorized", "Demand Dispatched to Legal", "Settlement Reconciled"]
@@ -266,7 +277,7 @@ with st.sidebar:
         st.session_state.user_info = None
         st.rerun()
 
-tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue"]
+tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue", "📖 Operations Manual"]
 if user_role == "super_admin":
     tab_titles.append("👥 User Administration")
 
@@ -281,7 +292,7 @@ with tabs[0]:
     conn.close()
     if leads:
         df = pd.DataFrame(leads)
-        st.dataframe(df[["id", "vertical", "carrier_name", "estimated_compensation", "regulatory_framework", "created_at"]], use_container_width=True)
+        st.dataframe(df[["id", "vertical", "carrier_name", "estimated_compensation", "regulatory_framework", "created_at"]])
     else:
         st.info("No leads pending review.")
 
@@ -293,7 +304,7 @@ with tabs[1]:
         claims_list = cur.fetchall()
     conn.close()
     if claims_list:
-        st.dataframe(pd.DataFrame(claims_list), use_container_width=True)
+        st.dataframe(pd.DataFrame(claims_list))
     else:
         st.info("No active claims.")
 
@@ -305,7 +316,7 @@ with tabs[2]:
         events = cur.fetchall()
     conn.close()
     if events:
-        st.dataframe(pd.DataFrame(events), use_container_width=True)
+        st.dataframe(pd.DataFrame(events))
     else:
         st.info("No webhook events logged.")
 
@@ -313,20 +324,64 @@ with tabs[3]:
     st.subheader("⚠️ Dead-Letter Queue (DLQ)")
     conn = get_db()
     with conn.cursor() as cur:
-        cur.execute("SELECT id::text AS id, carrier_name, claimant_name, dispatch_attempts, last_dispatch_error, status FROM leads WHERE status='dispatch_failed' OR last_dispatch_error IS NOT NULL;")
+        cur.execute("""
+            SELECT id::text AS id, carrier_name, claimant_name, 
+                   COALESCE(dispatch_attempts, 0) AS dispatch_attempts, 
+                   last_dispatch_error, status 
+            FROM leads 
+            WHERE status='dispatch_failed' OR last_dispatch_error IS NOT NULL;
+        """)
         dlq = cur.fetchall()
     conn.close()
     if dlq:
-        st.dataframe(pd.DataFrame(dlq), use_container_width=True)
+        st.dataframe(pd.DataFrame(dlq))
+        if user_role in ("super_admin", "claims_manager"):
+            sel_dlq = st.selectbox("Select Stalled Claim to Re-Queue", [d["id"] for d in dlq])
+            if st.button("🔄 Force Immediate Re-Dispatch", key=f"dlq_retry_{sel_dlq}"):
+                conn = get_db()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE leads 
+                        SET status='opted_in', dispatch_attempts=0, 
+                            last_dispatch_error=NULL, next_dispatch_retry_at=NOW(), 
+                            updated_at=NOW() 
+                        WHERE id::text=%s;
+                    """, (sel_dlq,))
+                conn.close()
+                st.success("Claim requeued for carrier dispatch.")
+                st.rerun()
     else:
         st.success("✅ Dead-Letter Queue is clear.")
 
-if user_role == "super_admin" and len(tabs) > 4:
-    with tabs[4]:
+with tabs[4]:
+    st.header("📖 Dispute Agent Platform: Field Manual & RBAC Guide")
+    with st.expander("1. System Purpose & Plain-English Overview", expanded=True):
+        st.markdown("""
+        **What Dispute Agent Does:**
+        When corporations cause non-excludable consumer disruptions (e.g., flight delays, multi-day internet outages, withheld security deposits), statutory regulations mandate liquidated cash compensation or bill credits.
+        Dispute Agent automates detection, evaluation, formal PDF demand compilation, carrier dispatch, and 25% fee reconciliation.
+        """)
+    with st.expander("2. Supported Dispute Verticals & Laws", expanded=False):
+        st.markdown("""
+        * **✈️ Flight Disruptions (`flight_disruption`)**: US DOT 14 CFR Part 260 & UK261/EU261.
+        * **🌐 Telecom & ISP Outages (`isp_outage`)**: State PUC Tariffs & FCC Mandates.
+        * **🏠 Security Deposit Non-Compliance (`security_deposit`)**: State Tenancy Codes (e.g., CRS 38-12-103) with 2x to 3x liquidated penalties.
+        * **⚖️ Class Action Restitution (`class_action`)**: Active court-approved restitution pools.
+        """)
+    with st.expander("3. Role Permissions (RBAC)", expanded=False):
+        st.markdown("""
+        * `super_admin`: Full authority, claim actions, DLQ overrides, and User Administration.
+        * `claims_manager`: Review queue, approvals, and DLQ re-dispatch actions.
+        * `claims_agent`: Review and approve/reject social signals.
+        * `auditor`: Read-only access to portfolio ledgers and webhook telemetry.
+        """)
+
+if user_role == "super_admin" and len(tabs) > 5:
+    with tabs[5]:
         st.subheader("👥 User Management & Role Provisioning")
         conn = get_db()
         with conn.cursor() as cur:
             cur.execute("SELECT id::text AS id, username, full_name, role, is_2fa_enabled, is_active FROM admin_users ORDER BY created_at ASC;")
             users = cur.fetchall()
         conn.close()
-        st.dataframe(pd.DataFrame(users), use_container_width=True)
+        st.dataframe(pd.DataFrame(users))
