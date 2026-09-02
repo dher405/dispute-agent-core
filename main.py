@@ -29,7 +29,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 app = FastAPI(
     title="EasyClaim Autonomous Recovery Engine",
     description="Statutory micro-dispute resolution, multi-vendor ingestion, and telemetry logging.",
-    version="3.3.0"
+    version="3.5.0"
 )
 
 app.add_middleware(
@@ -141,7 +141,7 @@ class SettlementPayload(BaseModel):
     lead_id: str
     recovery_amount: Decimal
 
-# --- AI Evaluation Gateway ---
+# --- AI Legal Assessment Gateway ---
 
 def evaluate_multi_vertical_signal(text: str) -> Dict[str, Any]:
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -237,7 +237,7 @@ def trigger_carrier_demand_pipeline(lead_id: str):
         log_system_event("carrier_dispatcher", "EXCEPTION", "ERROR", str(e), lead_id=lead_id)
 
 # =====================================================================
-# UNIFIED MULTI-VENDOR AUTONOMOUS INGESTION & OUTREACH ENGINE
+# MULTI-VENDOR INGESTION & OUTREACH ENGINE
 # =====================================================================
 
 INGESTION_KEYWORDS = [
@@ -252,7 +252,6 @@ BLUESKY_QUERIES = [
 ]
 
 def sweep_reddit_vendor():
-    """Sweeps Reddit subreddits and logs operational telemetry."""
     raw_subs = get_db_setting("MONITORED_SUBREDDITS", "unitedairlines,delta,americanairlines,southwestairlines,comcast,ATT,Tenant,mildlyinfuriating")
     subreddits = [s.strip() for s in raw_subs.split(",") if s.strip()]
 
@@ -271,7 +270,7 @@ def sweep_reddit_vendor():
         try:
             res = requests.get(
                 f"https://www.reddit.com/r/{sub}/new.json?limit=10",
-                headers={"User-Agent": "DisputeAgentCore/3.3"},
+                headers={"User-Agent": "DisputeAgentCore/3.5"},
                 timeout=10
             )
             if res.status_code == 200:
@@ -338,7 +337,6 @@ def sweep_reddit_vendor():
     )
 
 def sweep_bluesky_vendor():
-    """Sweeps Bluesky AT Protocol firehose search endpoint with standard headers and logs telemetry."""
     endpoint = "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts"
     log_system_event(
         "bluesky_ingestion",
@@ -353,8 +351,11 @@ def sweep_bluesky_vendor():
     }
 
     staged_count = 0
+    queried = 0
+
     for query in BLUESKY_QUERIES:
         try:
+            queried += 1
             res = requests.get(endpoint, params={"q": query, "limit": 10, "sort": "latest"}, headers=headers, timeout=10)
             if res.status_code == 200:
                 posts = res.json().get("posts", [])
@@ -411,6 +412,9 @@ def sweep_bluesky_vendor():
                                     lead_id=lead_id,
                                     metadata={"post_url": post_url}
                                 )
+            elif res.status_code == 403:
+                log_system_event("bluesky_ingestion", "RATE_LIMIT_NOTICE", "WARN", f"Bluesky AppView returned 403 for query '{query}'. Continuing other vendors.")
+                break
             time.sleep(0.5)
         except Exception as e:
             log_system_event("bluesky_ingestion", "POLL_ERROR", "WARN", f"Error querying Bluesky for '{query}': {e}")
@@ -419,11 +423,10 @@ def sweep_bluesky_vendor():
         "bluesky_ingestion",
         "POLL_COMPLETE",
         "INFO",
-        f"Bluesky sweep finished. Staged {staged_count} new lead(s)."
+        f"Bluesky sweep finished. Evaluated {queried} query terms. Staged {staged_count} new lead(s)."
     )
 
 def sweep_hackernews_vendor():
-    """Sweeps Hacker News for ISP outage discussions and SLA violations."""
     try:
         log_system_event("hackernews_ingestion", "POLL_START", "INFO", "Checking Hacker News Firebase API for major outage discussions.")
         hn_res = requests.get("https://hacker-news.firebaseio.com/v0/newstories.json", timeout=8)
@@ -486,7 +489,7 @@ def sweep_hackernews_vendor():
         log_system_event("hackernews_ingestion", "POLL_ERROR", "WARN", f"HN check error: {e}")
 
 def process_outbound_queue():
-    """Sweeps approved leads and delivers outreach via target platform or dry-run simulation."""
+    """Sweeps approved leads and delivers outreach via target platform or simulation mode."""
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute("""
@@ -541,7 +544,7 @@ def process_outbound_queue():
                         client_secret=reddit_client_secret,
                         username=reddit_username,
                         password=reddit_password,
-                        user_agent=get_db_setting("REDDIT_USER_AGENT", "EasyClaimAdvocate/3.3")
+                        user_agent=get_db_setting("REDDIT_USER_AGENT", "EasyClaimAdvocate/3.5")
                     )
                     submission = reddit.submission(url=post_url)
                     comment = submission.reply(outreach_text)
@@ -550,10 +553,10 @@ def process_outbound_queue():
                     dispatch_successful = False
                     dispatch_note = f"Reddit API error: {praw_err}"
             else:
-                dispatch_note = "Dispatched via automated pipeline (Reddit dry-run simulation mode active)."
+                dispatch_note = "Dispatched in automated pipeline (Reddit dry-run simulation mode active)."
 
         elif platform == "bluesky":
-            dispatch_note = f"Dispatched via AT Protocol notification to @{recipient}."
+            dispatch_note = f"Dispatched via AT Protocol mention to @{recipient}."
 
         elif platform in ("direct_inbound", "easyclaim_landing_page"):
             dispatch_note = f"Direct customer message queued to {lead.get('claimant_email') or lead.get('claimant_phone')}."
@@ -581,10 +584,10 @@ def process_outbound_queue():
                 lead_id=lead_id
             )
 
-def unified_autonomous_engine():
+def master_autonomous_cycle():
     """Master background loop running sweeps and outbound processing every 60 seconds."""
     logger.info("[ENGINE] Master Multi-Vendor Ingestion & Outreach Engine Started (60s Cadence).")
-    time.sleep(5)
+    time.sleep(3)
 
     while True:
         cycle_start = time.time()
@@ -600,11 +603,11 @@ def unified_autonomous_engine():
             # 3. Sweep Hacker News
             sweep_hackernews_vendor()
 
-            # 4. Sweep Outbound Queue
+            # 4. Sweep Outbound Outreach Queue
             process_outbound_queue()
 
         except Exception as e:
-            logger.error(f"[ENGINE EXCEPTION] Master autonomous cycle encountered error: {e}")
+            logger.error(f"[ENGINE EXCEPTION] Master autonomous cycle error: {e}")
             log_system_event("engine_supervisor", "CYCLE_EXCEPTION", "ERROR", str(e))
 
         elapsed = time.time() - cycle_start
@@ -614,7 +617,7 @@ def unified_autonomous_engine():
 @app.on_event("startup")
 def startup_event():
     """Spawns unified background thread on FastAPI application startup."""
-    t = threading.Thread(target=unified_autonomous_engine, daemon=True, name="DisputeAgentUnifiedEngine")
+    t = threading.Thread(target=master_autonomous_cycle, daemon=True, name="DisputeAgentMasterEngine")
     t.start()
     logger.info("[STARTUP] Unified Multi-Vendor Engine background thread initialized.")
 
@@ -624,459 +627,10 @@ def startup_event():
 
 @app.get("/", response_class=HTMLResponse)
 def serve_landing_page():
-    return """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EasyClaim | Autonomous Statutory Dispute Resolution</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --primary: #2563eb;
-      --primary-hover: #1d4ed8;
-      --slate-900: #0f172a;
-      --slate-800: #1e293b;
-      --slate-700: #334155;
-      --slate-600: #475569;
-      --slate-100: #f1f5f9;
-      --slate-50: #f8fafc;
-      --border: #e2e8f0;
-      --success: #10b981;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-      color: var(--slate-900);
-      background: #ffffff;
-      line-height: 1.6;
-    }
-    header {
-      border-bottom: 1px solid var(--border);
-      background: rgba(255, 255, 255, 0.95);
-      position: sticky;
-      top: 0;
-      z-index: 50;
-      backdrop-filter: blur(8px);
-    }
-    .nav-container {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 1rem 1.5rem;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .logo {
-      font-weight: 800;
-      font-size: 1.35rem;
-      color: var(--slate-900);
-      text-decoration: none;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    .logo span { color: var(--primary); }
-    .nav-links { display: flex; gap: 1.5rem; align-items: center; }
-    .nav-links a {
-      color: var(--slate-600);
-      text-decoration: none;
-      font-weight: 500;
-      font-size: 0.95rem;
-      transition: color 0.15s;
-    }
-    .nav-links a:hover { color: var(--primary); }
-    .btn-nav {
-      background: var(--primary);
-      color: #fff !important;
-      padding: 0.55rem 1.1rem;
-      border-radius: 8px;
-      font-weight: 600;
-      transition: background 0.15s;
-    }
-    .btn-nav:hover { background: var(--primary-hover); }
-
-    .hero {
-      padding: 4.5rem 1.5rem 3.5rem;
-      text-align: center;
-      background: linear-gradient(180deg, var(--slate-50) 0%, #ffffff 100%);
-    }
-    .badge {
-      display: inline-block;
-      padding: 0.35rem 0.9rem;
-      background: #dbeafe;
-      color: #1e40af;
-      border-radius: 9999px;
-      font-size: 0.85rem;
-      font-weight: 700;
-      margin-bottom: 1.25rem;
-    }
-    .hero h1 {
-      font-size: clamp(2rem, 4.5vw, 3.25rem);
-      font-weight: 800;
-      line-height: 1.2;
-      color: var(--slate-900);
-      max-width: 850px;
-      margin: 0 auto 1.25rem;
-    }
-    .hero p {
-      font-size: 1.15rem;
-      color: var(--slate-600);
-      max-width: 680px;
-      margin: 0 auto 2rem;
-    }
-
-    .container { max-width: 1200px; margin: 0 auto; padding: 3rem 1.5rem; }
-    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; }
-    .card {
-      background: #fff;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 1.75rem;
-      transition: transform 0.2s, box-shadow 0.2s;
-    }
-    .card:hover { transform: translateY(-3px); box-shadow: 0 10px 25px -5px rgba(0,0,0,0.06); }
-    .card h3 { font-size: 1.25rem; margin-bottom: 0.5rem; color: var(--slate-900); }
-    .card p { color: var(--slate-600); font-size: 0.95rem; }
-    .stat-pill { font-size: 0.8rem; font-weight: 700; color: var(--primary); background: #eff6ff; padding: 0.2rem 0.6rem; border-radius: 4px; display: inline-block; margin-top: 1rem; }
-
-    .form-section {
-      background: var(--slate-50);
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      padding: 4rem 1.5rem;
-    }
-    .form-box {
-      max-width: 780px;
-      margin: 0 auto;
-      background: #fff;
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2.5rem;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.04);
-    }
-    .form-header { margin-bottom: 2rem; text-align: center; }
-    .form-header h2 { font-size: 1.85rem; font-weight: 800; }
-    .form-header p { color: var(--slate-600); font-size: 0.95rem; margin-top: 0.25rem; }
-    .row { display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
-    .col { flex: 1; min-width: 240px; }
-    label { display: block; font-weight: 600; font-size: 0.85rem; margin-bottom: 0.35rem; color: var(--slate-700); }
-    input, select, textarea {
-      width: 100%;
-      padding: 0.75rem 0.9rem;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      font-size: 0.95rem;
-      font-family: inherit;
-      color: var(--slate-900);
-      outline: none;
-      transition: border-color 0.15s;
-    }
-    input:focus, select:focus, textarea:focus { border-color: var(--primary); }
-    .terms-card {
-      background: var(--slate-50);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-      font-size: 0.85rem;
-      color: var(--slate-600);
-      margin: 1.25rem 0;
-    }
-    .btn-submit {
-      width: 100%;
-      background: var(--primary);
-      color: #fff;
-      padding: 0.9rem;
-      border: none;
-      border-radius: 8px;
-      font-size: 1.05rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: background 0.15s;
-    }
-    .btn-submit:hover { background: var(--primary-hover); }
-
-    .contact-container {
-      max-width: 780px;
-      margin: 0 auto;
-      padding: 4rem 1.5rem;
-    }
-    .contact-box {
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2.25rem;
-      background: #ffffff;
-    }
-    .alert-banner {
-      padding: 1rem;
-      border-radius: 8px;
-      margin-bottom: 1.5rem;
-      display: none;
-      font-size: 0.95rem;
-    }
-    .alert-success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
-    .alert-error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
-
-    footer {
-      border-top: 1px solid var(--border);
-      padding: 2.5rem 1.5rem;
-      text-align: center;
-      color: var(--slate-600);
-      font-size: 0.85rem;
-      background: #fff;
-    }
-  </style>
-</head>
-<body>
-
-  <header>
-    <div class="nav-container">
-      <a href="/" class="logo">⚖️ Easy<span>Claim</span></a>
-      <div class="nav-links">
-        <a href="#about">About</a>
-        <a href="#contact">Contact Us</a>
-        <a href="#claim" class="btn-nav">File a Claim</a>
-      </div>
-    </div>
-  </header>
-
-  <section class="hero">
-    <div class="badge">No Win, No Fee • 100% Contingency</div>
-    <h1>We Recover What Companies Statutorily Owe You.</h1>
-    <p>Airlines, broadband utilities, and landlords routinely withhold mandatory refunds. EasyClaim automatically compiles, cites, and serves formal legal demands to secure your liquidated restitution.</p>
-  </section>
-
-  <section class="container" id="about">
-    <div class="grid-3">
-      <div class="card">
-        <h3>Autonomous Legal Tech</h3>
-        <p>Our regulatory engine evaluates your disruption against statutory laws (US DOT 14 CFR Part 260, UK261/EU261, State PUC utility tariffs, and tenancy acts) to calculate mandatory damages.</p>
-        <span class="stat-pill">Instant Statutory Audit</span>
-      </div>
-      <div class="card">
-        <h3>Direct Legal Desk Dispatch</h3>
-        <p>We generate and serve verified ReportLab legal demand packages with digital signatures directly to carrier legal teams with an active 14-day compliance window.</p>
-        <span class="stat-pill">Formal Legal Demand</span>
-      </div>
-      <div class="card">
-        <h3>Zero Upfront Costs</h3>
-        <p>You pay $0 out of pocket. Our platform retains an industry-standard 25% contingency fee deducted only after cash restitution or bill credits are settled and recovered.</p>
-        <span class="stat-pill">25% Contingency Fee</span>
-      </div>
-    </div>
-  </section>
-
-  <section class="form-section" id="claim">
-    <div class="form-box">
-      <div class="form-header">
-        <h2>Submit Your Claim for Recovery</h2>
-        <p>Provide your incident details. Our AI engine will evaluate your legal eligibility and serve demand notices.</p>
-      </div>
-
-      <div id="claim-alert" class="alert-banner"></div>
-
-      <form id="claim-form">
-        <div class="row">
-          <div class="col">
-            <label for="vertical">Dispute Vertical *</label>
-            <select id="vertical" required>
-              <option value="flight_disruption">✈️ Flight Delay / Cancellation (DOT / UK261)</option>
-              <option value="isp_outage">🌐 Telecom & ISP Outage (PUC Tariff Credit)</option>
-              <option value="security_deposit">🏠 Security Deposit Withheld (Tenancy Act)</option>
-              <option value="class_action">⚖️ Class Action & Restitution Fund</option>
-            </select>
-          </div>
-          <div class="col">
-            <label for="carrier_name">Company / Vendor Name *</label>
-            <input type="text" id="carrier_name" placeholder="e.g. United Airlines, Xfinity, Landlord LLC" required>
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="col">
-            <label for="incident_identifier">Flight # / Account Ref / Property Address</label>
-            <input type="text" id="incident_identifier" placeholder="e.g. Flight UA 949 or Acct #8849-102">
-          </div>
-          <div class="col">
-            <label for="incident_date">Date of Incident *</label>
-            <input type="date" id="incident_date" required>
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="col">
-            <label for="claimant_name">Your Full Legal Name *</label>
-            <input type="text" id="claimant_name" placeholder="Jane Doe" required>
-          </div>
-          <div class="col">
-            <label for="claimant_email">Email Address *</label>
-            <input type="email" id="claimant_email" placeholder="jane@example.com" required>
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="col">
-            <label for="claimant_phone">Mobile Phone (For SMS Updates) *</label>
-            <input type="tel" id="claimant_phone" placeholder="+13035550199" required>
-          </div>
-          <div class="col">
-            <label for="claimant_address">Mailing Address</label>
-            <input type="text" id="claimant_address" placeholder="123 Main St, Denver, CO 80202">
-          </div>
-        </div>
-
-        <div style="margin-bottom: 1rem;">
-          <label for="incident_description">What happened? (Disruption Narrative) *</label>
-          <textarea id="incident_description" rows="4" placeholder="Describe the delay duration, lack of internet uptime, or unreturned deposit details..." required></textarea>
-        </div>
-
-        <div class="terms-card">
-          <strong>Contingency Agreement:</strong> By signing below, you authorize EasyClaim (Dispute Agent Platform) to draft and deliver statutory legal demand packages on your behalf. You agree to a 25% contingency fee deducted only upon successful monetary restitution.
-        </div>
-
-        <div style="margin-bottom: 1.5rem;">
-          <label for="digital_signature">Digital Signature (Type Full Legal Name) *</label>
-          <input type="text" id="digital_signature" placeholder="Jane Doe" required>
-        </div>
-
-        <button type="submit" class="btn-submit" id="submit-btn">🚀 Submit Claim & Dispatch Demand</button>
-      </form>
-    </div>
-  </section>
-
-  <section class="contact-container" id="contact">
-    <div class="contact-box">
-      <div class="form-header" style="text-align: left; margin-bottom: 1.5rem;">
-        <h2>Contact Our Advocacy Team</h2>
-        <p>Have questions about your legal rights or need dedicated case support? Leave us a message.</p>
-      </div>
-
-      <div id="contact-alert" class="alert-banner"></div>
-
-      <form id="contact-form">
-        <div class="row">
-          <div class="col">
-            <label for="contact_name">Your Name *</label>
-            <input type="text" id="contact_name" placeholder="David" required>
-          </div>
-          <div class="col">
-            <label for="contact_email">Your Email *</label>
-            <input type="email" id="contact_email" placeholder="dave@example.com" required>
-          </div>
-        </div>
-        <div style="margin-bottom: 1rem;">
-          <label for="contact_subject">Subject</label>
-          <input type="text" id="contact_subject" placeholder="Question regarding flight or ISP claim">
-        </div>
-        <div style="margin-bottom: 1.5rem;">
-          <label for="contact_message">Message *</label>
-          <textarea id="contact_message" rows="4" placeholder="How can our claims specialists assist you?" required></textarea>
-        </div>
-        <button type="submit" class="btn-submit" style="background: var(--slate-800);" id="contact-btn">Send Message</button>
-      </form>
-    </div>
-  </section>
-
-  <footer>
-    <p>&copy; 2026 EasyClaim / Dispute Agent Recovery Operations. All Rights Reserved. Statutory Advocacy & Representation.</p>
-  </footer>
-
-  <script>
-    document.getElementById('claim-form').addEventListener('submit', async function(e) {
-      e.preventDefault();
-      const btn = document.getElementById('submit-btn');
-      const alertBox = document.getElementById('claim-alert');
-      btn.disabled = true;
-      btn.innerText = "Analyzing Statutory Rights & Dispatching...";
-
-      const payload = {
-        vertical: document.getElementById('vertical').value,
-        carrier_name: document.getElementById('carrier_name').value,
-        incident_identifier: document.getElementById('incident_identifier').value,
-        incident_date: document.getElementById('incident_date').value,
-        claimant_name: document.getElementById('claimant_name').value,
-        claimant_email: document.getElementById('claimant_email').value,
-        claimant_phone: document.getElementById('claimant_phone').value,
-        claimant_address: document.getElementById('claimant_address').value,
-        incident_description: document.getElementById('incident_description').value,
-        digital_signature: document.getElementById('digital_signature').value
-      };
-
-      try {
-        const response = await fetch('/api/v1/claims/portal-intake', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const data = await response.json();
-
-        if (response.ok) {
-          alertBox.className = "alert-banner alert-success";
-          alertBox.style.display = "block";
-          alertBox.innerHTML = `<strong>Claim Successfully Staged & Dispatched!</strong><br>
-            Reference ID: <code>${data.lead_id}</code><br>
-            Statutory Basis: <strong>${data.regulatory_framework}</strong><br>
-            Estimated Valuation: <strong>$${data.estimated_compensation}</strong><br>
-            A confirmation SMS has been dispatched. <a href="https://dispute-admin.onrender.com/?claim_id=${data.lead_id}" target="_blank" style="color:#065f46;font-weight:700;">Track Your Claim Live &rarr;</a>`;
-          document.getElementById('claim-form').reset();
-        } else {
-          throw new Error(data.detail || "Submission failed.");
-        }
-      } catch (err) {
-        alertBox.className = "alert-banner alert-error";
-        alertBox.style.display = "block";
-        alertBox.innerText = "Error: " + err.message;
-      } finally {
-        btn.disabled = false;
-        btn.innerText = "🚀 Submit Claim & Dispatch Demand";
-      }
-    });
-
-    document.getElementById('contact-form').addEventListener('submit', async function(e) {
-      e.preventDefault();
-      const btn = document.getElementById('contact-btn');
-      const alertBox = document.getElementById('contact-alert');
-      btn.disabled = true;
-      btn.innerText = "Sending Message...";
-
-      const payload = {
-        sender_name: document.getElementById('contact_name').value,
-        sender_email: document.getElementById('contact_email').value,
-        subject: document.getElementById('contact_subject').value,
-        message: document.getElementById('contact_message').value
-      };
-
-      try {
-        const response = await fetch('/api/v1/contact', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        const data = await response.json();
-
-        if (response.ok) {
-          alertBox.className = "alert-banner alert-success";
-          alertBox.style.display = "block";
-          alertBox.innerText = "Thank you! Your message has been received. A claims specialist will follow up shortly.";
-          document.getElementById('contact-form').reset();
-        } else {
-          throw new Error(data.detail || "Failed to send message.");
-        }
-      } catch (err) {
-        alertBox.className = "alert-banner alert-error";
-        alertBox.style.display = "block";
-        alertBox.innerText = "Error: " + err.message;
-      } finally {
-        btn.disabled = false;
-        btn.innerText = "Send Message";
-      }
-    });
-  </script>
-</body>
-</html>
-"""
+    if os.path.exists("landing_page.html"):
+        with open("landing_page.html", "r", encoding="utf-8") as f:
+            return f.read()
+    return "<h1>EasyClaim Portal Online</h1>"
 
 # =====================================================================
 # SYSTEM DIAGNOSTIC & TELEMETRY API
@@ -1088,14 +642,12 @@ def health_check():
 
 @app.get("/api/v1/system/health-check", status_code=status.HTTP_200_OK)
 def run_system_health_check():
-    """Performs an end-to-end active probe of DB, Gemini AI, and Vendor API configurations."""
     results: Dict[str, Any] = {
         "timestamp": time.time(),
         "overall_status": "healthy",
         "probes": {}
     }
 
-    # 1. PostgreSQL Probe
     t0 = time.time()
     try:
         conn = get_db_connection()
@@ -1112,7 +664,6 @@ def run_system_health_check():
         results["overall_status"] = "degraded"
         results["probes"]["database"] = {"status": "error", "message": str(e)}
 
-    # 2. Google Gemini Probe
     t0 = time.time()
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
@@ -1130,7 +681,6 @@ def run_system_health_check():
         results["overall_status"] = "degraded"
         results["probes"]["gemini_ai"] = {"status": "error", "message": str(e)}
 
-    # 3. Twilio SMS Probe
     tw_sid = get_sms_setting("TWILIO_ACCOUNT_SID")
     tw_token = get_sms_setting("TWILIO_AUTH_TOKEN")
     tw_from = get_sms_setting("TWILIO_PHONE_NUMBER")
@@ -1140,7 +690,6 @@ def run_system_health_check():
         "message": f"Active SID: {tw_sid[:6]}... ({tw_from})" if tw_sid else "Dry-run simulator mode."
     }
 
-    # 4. Multi-Vendor Daemons Status
     results["probes"]["ingestion_engine"] = {
         "status": "operational",
         "cadence_seconds": int(get_db_setting("POLL_INTERVAL_SECONDS", "60")),
