@@ -422,20 +422,20 @@ with tabs[0]:
 
             col_a, col_b = st.columns(2)
             with col_a:
-                st.markdown(f"**Platform / User:** `{selected_lead.get('source_platform')}` / `{selected_lead.get('username')}`")
-                st.markdown(f"**Respondent Entity:** `{selected_lead.get('carrier_name') or 'N/A'}`")
-                st.markdown(f"**Statutory Basis:** `{selected_lead.get('regulatory_framework') or 'Consumer Protection Laws'}`")
-                st.markdown(f"**Estimated Valuation:** **${float(selected_lead.get('estimated_compensation') or 0):.2f}**")
-                st.info(f"**AI Reasoning & Disruption Breakdown:**\n{selected_lead.get('ai_reasoning') or 'Disruption confirmed by operational rules.'}")
+                st.markdown(f"**Platform / User:** `{(selected_lead or {}).get('source_platform')}` / `{(selected_lead or {}).get('username')}`")
+                st.markdown(f"**Respondent Entity:** `{(selected_lead or {}).get('carrier_name') or 'N/A'}`")
+                st.markdown(f"**Statutory Basis:** `{(selected_lead or {}).get('regulatory_framework') or 'Consumer Protection Laws'}`")
+                st.markdown(f"**Estimated Valuation:** **${float((selected_lead or {}).get('estimated_compensation') or 0):.2f}**")
+                st.info(f"**AI Reasoning & Disruption Breakdown:**\n{(selected_lead or {}).get('ai_reasoning') or 'Disruption confirmed by operational rules.'}")
 
             with col_b:
                 claim_auth_link = f"https://dispute-admin.onrender.com/?claim_id={selected_lead_id}"
-                raw_copy = selected_lead.get("outreach_copy") or ""
+                raw_copy = (selected_lead or {}).get("outreach_copy") or ""
                 
                 if any(p in raw_copy.lower() for p in ["dear ", "customer care", "i am writing to"]):
-                    c_name = selected_lead.get("carrier_name") or "the provider"
-                    c_amt = float(selected_lead.get("estimated_compensation") or 0.0)
-                    c_law = selected_lead.get("regulatory_framework") or "statutory protections"
+                    c_name = (selected_lead or {}).get("carrier_name") or "the provider"
+                    c_amt = float((selected_lead or {}).get("estimated_compensation") or 0.0)
+                    c_law = (selected_lead or {}).get("regulatory_framework") or "statutory protections"
                     full_outreach_proposal = (
                         f"Under {c_law}, you are entitled to claim up to ${c_amt:.2f} from {c_name} for your disruption. "
                         f"Authorize our legal desk to serve your formal demand letter here: {claim_auth_link}"
@@ -767,14 +767,14 @@ with tabs[3]:
                     is_dummy = any(d in src_url.lower() for d in ["test_eval", "test_ua", "manual-intake", "direct-intake", "comments/$", "comments/"])
                     if is_dummy:
                         st.markdown("🔗 **Where it is responding (Target Post):**")
-                        source_plat = selected_lead.get("source_platform", "Direct").capitalize()
-                        lead_uuid = selected_lead.get("id", "N/A")
+                        source_plat = (selected_lead or {}).get("source_platform", "Direct").capitalize()
+                        lead_uuid = (selected_lead or {}).get("id", "N/A")
                         st.markdown(f"**{source_plat} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
-                        plat_src = selected_lead.get("source_platform", "Direct")
-                        lead_uuid = selected_lead.get("id", "N/A")
+                        plat_src = (selected_lead or {}).get("source_platform", "Direct")
+                        lead_uuid = (selected_lead or {}).get("id", "N/A")
                         st.markdown(f"**{plat_src.capitalize()} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
-                        target_url = selected_lead.get("post_url", "https://reddit.com")
-                        carrier_title = selected_lead.get("carrier_name", "Target Discussion Thread")
+                        target_url = (selected_lead or {}).get("post_url", "https://reddit.com")
+                        carrier_title = (selected_lead or {}).get("carrier_name", "Target Discussion Thread")
                         st.markdown(f"Target Post URL: [{carrier_title}]({target_url})")
                     else:
                         full_url = src_url if src_url.startswith("http") else f"https://{src_url}"
