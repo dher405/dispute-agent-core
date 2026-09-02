@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="Dispute Agent | Operations & Claims Desk",
+    page_title="Dispute Agent | Claims & Operations Desk",
     page_icon="⚖️",
     layout="wide"
 )
@@ -63,6 +63,17 @@ def ensure_database_schema():
                     category VARCHAR(50) NOT NULL,
                     description TEXT,
                     updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS customer_inquiries (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    sender_name VARCHAR(255) NOT NULL,
+                    sender_email VARCHAR(255) NOT NULL,
+                    subject VARCHAR(255),
+                    message TEXT NOT NULL,
+                    status VARCHAR(50) DEFAULT 'unread',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
             cur.execute("SELECT COUNT(*) FROM admin_users;")
@@ -450,7 +461,7 @@ with tabs[0]:
     except Exception as e:
         st.error(f"Error loading review queue: {e}")
 
-# --- TAB 1: DIRECT MANUAL INTAKE (NEW) ---
+# --- TAB 1: DIRECT MANUAL INTAKE ---
 with tabs[1]:
     st.subheader("✍️ Direct Manual Claim Ingestion & Scenario Builder")
     st.caption("Create a dispute scenario when a consumer contacts you directly via email, phone, or referral.")
@@ -494,7 +505,6 @@ with tabs[1]:
                                     lead_uuid = new_lead["id"]
                                     direct_link = f"https://dispute-admin.onrender.com/?claim_id={lead_uuid}"
                                     
-                                    # If customer details were provided, attach them to the lead record
                                     if c_name_in or c_contact_in:
                                         conn = get_db()
                                         with conn.cursor() as cur:
@@ -511,7 +521,6 @@ with tabs[1]:
                                     st.success("✅ Case successfully evaluated and staged in database!")
                                     st.markdown(f"### Customer Authorization Link:\n`{direct_link}`")
                                     
-                                    # Copyable email template
                                     email_pitch = (
                                         f"Hi {c_name_in or 'there'},\n\n"
                                         f"We analyzed your disruption involving {new_lead.get('carrier_name')}. "
@@ -618,14 +627,18 @@ with tabs[1]:
                     except Exception as e:
                         st.error(f"Database insertion failed: {e}")
 
-# --- TAB 2: CUSTOMER INQUIRIES (FROM LANDING PAGE) ---
-with tabs[7]:
+# --- TAB 2: CUSTOMER INQUIRIES ---
+with tabs[2]:
     st.subheader("💬 Inbound Contact Messages & Inquiries")
     st.caption("Messages submitted through the public EasyClaim contact form.")
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("SELECT id::text AS id, sender_name, sender_email, subject, message, status, created_at FROM customer_inquiries ORDER BY created_at DESC LIMIT 50;")
+            cur.execute("""
+                SELECT id::text AS id, sender_name, sender_email, subject, message, status, created_at 
+                FROM customer_inquiries 
+                ORDER BY created_at DESC LIMIT 50;
+            """)
             inquiries = cur.fetchall()
         conn.close()
 
@@ -653,7 +666,7 @@ with tabs[7]:
         st.error(f"Error loading customer inquiries: {e}")
 
 # --- TAB 3: ACTIVE CLAIMS ---
-with tabs[7]:
+with tabs[3]:
     st.subheader("Active & Settled Claims Ledger")
     try:
         conn = get_db()
@@ -678,13 +691,16 @@ with tabs[7]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 3: WEBHOOK AUDIT ---
-with tabs[7]:
+# --- TAB 4: WEBHOOK AUDIT ---
+with tabs[4]:
     st.subheader("Inbound Carrier Telemetry Events")
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("SELECT id::text, carrier_name, vertical, event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 50;")
+            cur.execute("""
+                SELECT id::text, carrier_name, vertical, event_type, settlement_amount, parsed_notes, created_at 
+                FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 50;
+            """)
             events = cur.fetchall()
         conn.close()
         if events:
@@ -694,8 +710,8 @@ with tabs[7]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 4: DLQ ---
-with tabs[7]:
+# --- TAB 5: DEAD-LETTER QUEUE (DLQ) ---
+with tabs[5]:
     st.subheader("⚠️ Dead-Letter Queue (DLQ)")
     try:
         conn = get_db()
@@ -731,31 +747,130 @@ with tabs[7]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 5: OPERATIONS MANUAL ---
-with tabs[7]:
-    st.header("📖 Dispute Agent Platform: Field Manual & RBAC Guide")
-    with st.expander("1. System Purpose & Plain-English Overview", expanded=True):
+# --- TAB 6: COMPREHENSIVE OPERATIONS & RBAC MANUAL ---
+with tabs[6]:
+    st.header("📖 Dispute Agent Platform: Complete Operations Manual")
+    st.caption("Standard Operating Procedures, Claim Lifecycle Guidelines, and Troubleshooting Reference.")
+
+    with st.expander("1. Platform Overview & Plain-English Purpose", expanded=True):
         st.markdown("""
-        **What Dispute Agent Does:**
-        When corporations cause non-excludable consumer disruptions (e.g., flight delays, multi-day internet outages, withheld security deposits), statutory regulations mandate liquidated cash compensation or bill credits.
-        Dispute Agent automates detection, evaluation, formal PDF demand compilation, carrier dispatch, and 25% fee reconciliation.
-        """)
-    with st.expander("2. Supported Dispute Verticals & Laws", expanded=False):
-        st.markdown("""
-        * **✈️ Flight Disruptions (`flight_disruption`)**: US DOT 14 CFR Part 260 & UK261/EU261.
-        * **🌐 Telecom & ISP Outages (`isp_outage`)**: State PUC Tariffs & FCC Mandates.
-        * **🏠 Security Deposit Non-Compliance (`security_deposit`)**: State Tenancy Codes (e.g., CRS 38-12-103) with 2x to 3x liquidated penalties.
-        * **⚖️ Class Action Restitution (`class_action`)**: Active court-approved restitution pools.
-        """)
-    with st.expander("3. Role Permissions (RBAC)", expanded=False):
-        st.markdown("""
-        * `super_admin`: Full authority, claim actions, DLQ overrides, Vendor configuration, and User Administration.
-        * `claims_manager`: Review queue, approvals, and DLQ re-dispatch actions.
-        * `claims_agent`: Review and approve/reject social signals.
-        * `auditor`: Read-only access to portfolio ledgers and webhook telemetry.
+        **What Dispute Agent / EasyClaim Does:**
+        Corporate providers (airlines, broadband providers, and landlords) frequently fail to fulfill statutory obligations when disruptions occur. State, federal, and international consumer protection statutes mandate monetary compensation, statutory interest, and liquidated penalties for these failures.
+
+        Dispute Agent operates as an autonomous recovery engine that:
+        1. **Detects** consumer disruptions across social platforms or direct intake channels.
+        2. **Quantifies** statutory restitution using Google Gemini AI and authoritative legal citations.
+        3. **Onboards** claimants via an automated contingency fee authorization workflow (0 upfront fees, 25% fee only upon recovery).
+        4. **Generates & Dispatches** verified ReportLab PDF demand letters to carrier legal desks.
+        5. **Reconciles** carrier settlements and executes automated contingency fee accounting.
         """)
 
-# --- TAB 6: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
+    with st.expander("2. End-to-End Claim Lifecycle & Status Flow", expanded=True):
+        st.markdown("""
+        Every claim in the database moves through a strict lifecycle:
+
+        ```
+        [staged_for_review] ──▶ [approved] ──▶ [contacted] ──▶ [opted_in] ──▶ [dispatched] ──▶ [settled]
+                 │                                                │
+                 └──▶ [rejected]                                  └──▶ [dispatch_failed (DLQ)]
+        ```
+
+        * **`staged_for_review`**: 
+          * *What it means:* A new disruption has been detected or submitted. The AI has calculated the legal basis and estimated valuation, but no outreach has been sent yet.
+          * *Action required:* Review the lead in **Tab 0 (`Ingestion Queue`)**, ensure the outreach copy is consumer-directed, and click **Approve** or **Dismiss**.
+        * **`approved`**: 
+          * *What it means:* An operator has approved the outreach text. The claim is queued for notification.
+        * **`contacted`**: 
+          * *What it means:* The claimant has been sent their unique authorization URL (`/?claim_id=<UUID>`).
+        * **`opted_in`**: 
+          * *What it means:* The consumer opened the link, entered their contact information, signed the contingency agreement digitally, and authorized EasyClaim to represent them.
+        * **`dispatched`**: 
+          * *What it means:* The system automatically compiled the ReportLab statutory PDF demand letter, served it to the respondent's legal department via email/SMTP, and sent a confirmation SMS to the claimant's phone. A 14-day statutory compliance countdown is now active.
+        * **`settled`**: 
+          * *What it means:* The airline, utility, or landlord approved the claim. The gross settlement and 25% platform contingency fee have been recorded, and an alert SMS has been dispatched to the consumer.
+        * **`rejected`**: 
+          * *What it means:* The claim was dismissed as non-viable or outside the statutory scope.
+        * **`dispatch_failed` (DLQ)**: 
+          * *What it means:* An email transmission error occurred 5 times consecutively. The claim is held safely in the Dead-Letter Queue for operator remediation.
+        """)
+
+    with st.expander("3. Step-by-Step Operator Instructions (From Ingest to Payout)", expanded=True):
+        st.markdown("""
+        ### Step 1: Handling Inbound Consumer Complaints
+        * **Option A: Social Media Ingestion (Tab 0)**
+          * Open **Tab 0 (`Ingestion Queue`)**.
+          * Select any staged claim from the dropdown.
+          * Review the **Respondent Entity**, **Estimated Valuation**, and the **AI Statutory Reasoning**.
+          * Verify that the outreach text explains what the company owes them. Click **Approve & Stage Outreach**.
+        * **Option B: Direct Client Inbound (Tab 1)**
+          * If a customer contacts you directly via email or phone, open **Tab 1 (`Direct Manual Intake`)**.
+          * Paste their complaint into the **AI-Assisted** box and click **Analyze Statutory Viability**.
+          * Copy the generated client link (`/?claim_id=<UUID>`) and send it directly to the consumer.
+        * **Option C: Public Website Submissions (EasyClaim Landing Page)**
+          * Consumers who visit `https://dispute-api-xyl7.onrender.com/#claim` can submit their details and digital signature directly.
+          * These claims are automatically created with status `opted_in`, their PDF demand is dispatched to the carrier legal desk immediately, and a confirmation SMS is sent to their phone without requiring manual intervention.
+
+        ### Step 2: Customer Authorization & E-Signature
+        * The consumer opens their personalized URL.
+        * They see the target entity, estimated payout, and statutory protection laws.
+        * They confirm their full legal name, email, phone number, and incident reference (Flight PNR or Account Number).
+        * They review the 25% contingency agreement ($0 upfront costs) and type their name to digitally e-sign.
+        * Once submitted, the system triggers the ReportLab PDF compilation and SMTP dispatch.
+
+        ### Step 3: Carrier Demand Dispatch & Compliance Tracking
+        * Once the status reaches `dispatched`, open **Tab 3 (`Active Claims`)** to monitor the case portfolio.
+        * The demand letter is on file with the respondent company's legal department with a formal 14 business day response notice.
+
+        ### Step 4: Settlement Reconciliation & 25% Fee Collection
+        * When a carrier approves compensation, they send a webhook notice or payout tender.
+        * If automated, the webhook updates the status to `settled`, computes $\\text{recovery} \\times 0.25$, and logs the contingency fee.
+        * For manual settlement checks, enter the gross amount in the settlement endpoint to update the case and dispatch a settlement notification SMS to the claimant.
+        """)
+
+    with st.expander("4. The Four Supported Dispute Verticals & Legal Rules", expanded=False):
+        st.markdown("""
+        | Vertical | Regulatory Framework | Statutory Mandate / Consumer Entitlement |
+        |---|---|---|
+        | **✈️ Flight Disruptions** (`flight_disruption`) | **US DOT 14 CFR Part 260**<br>**UK261 / EU261** | • Cash refund for domestic flights delayed >3 hrs or canceled where alternative flight is refused.<br>• Flat cash compensation of **£220 to £520 / €250 to €600** ($300–$650 USD) for delays >3 hrs departing the UK/EU due to carrier fault. |
+        | **🌐 Telecom & ISP Outages** (`isp_outage`) | **State PUC Utility Tariffs**<br>**FCC SLA Regulations** | Mandatory prorated bill credits and liquidated statutory service outage compensation when broadband or phone service drops for >4 to 24 continuous hours. |
+        | **🏠 Security Deposits** (`security_deposit`) | **State Residential Tenancy Acts**<br>(e.g., C.R.S. § 38-12-103) | Landlords must return deposits or provide an itemized deduction statement within 30 to 60 days of lease termination. Failure forfeits all deductions and incurs **2x to 3x liquidated statutory damages**. |
+        | **⚖️ Class Actions** (`class_action`) | **Court Settlement Orders**<br>**FTC Restitution Mandates** | Liquidated restitution payments from court-approved common settlement funds for qualifying consumer claims. |
+        """)
+
+    with st.expander("5. Managing Website Messages & Direct Inquiries", expanded=False):
+        st.markdown("""
+        * Visitors who submit messages through the contact form at `https://dispute-api-xyl7.onrender.com/#contact` are routed directly to **Tab 2 (`Customer Inquiries`)**.
+        * Open **Tab 2** to inspect the sender's name, email, subject line, and full message text.
+        * After responding to the customer, click **Mark as Read / Processed** to keep the queue organized.
+        """)
+
+    with st.expander("6. Troubleshooting & Dead-Letter Queue (DLQ) Remediation", expanded=False):
+        st.markdown("""
+        * **When does a claim enter the DLQ?**
+          * If an airline legal email address rejects the demand package or the SMTP server experiences a timeout, the background worker will retry automatically up to 5 times using exponential backoff ($2^1, 2^2, 2^3, 2^4, 2^5$ minutes).
+          * If all 5 attempts fail, the claim enters **Tab 5 (`Dead-Letter Queue`)** as `dispatch_failed`.
+        * **How to remediate a DLQ record:**
+          1. Open **Tab 5 (`Dead-Letter Queue`)**.
+          2. Inspect the **Last Dispatch Error** column to see why the email failed (e.g., invalid carrier address or connection timeout).
+          3. Select the claim from the dropdown.
+          4. Click **🔄 Force Immediate Re-Dispatch** to clear the attempt counter and trigger an immediate re-send.
+        """)
+
+    with st.expander("7. System Administration, API Keys & 2FA Security", expanded=False):
+        st.markdown("""
+        * **Vendor Integration Settings (Super Admin Only):**
+          * In the left sidebar, Super Admins can expand **⚙️ Vendor & Service Integrations**.
+          * You can update your **Twilio SMS keys**, **Stripe API secrets**, **SMTP Email credentials**, and **Monitored Subreddits** dynamically.
+          * Clicking **Save Integration Settings** updates the database immediately with no code deployment required.
+        * **Two-Factor Authentication (2FA):**
+          * Every operator can secure their account in the sidebar under **🔐 Two-Factor Security**.
+          * Click **Enable 2FA Authenticator**, scan the QR code using Google Authenticator, 1Password, or Authy, enter the 6-digit verification code, and click **Activate 2FA**.
+        * **Provisioning New Team Logins (Super Admin Only):**
+          * Super Admins have access to **Tab 7 (`User Administration`)** to create accounts for team members.
+          * Assign roles based on access needs: `claims_agent` (review only), `claims_manager` (review + DLQ actions), `auditor` (read-only), or `super_admin` (full system access).
+        """)
+
+# --- TAB 7: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
 if user_role == "super_admin" and len(tabs) > 7:
     with tabs[7]:
         st.subheader("👥 User Management & Role Provisioning")
