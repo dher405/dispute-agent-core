@@ -657,31 +657,153 @@ with tabs[2]:
     except Exception as e:
         st.error(f"Error loading customer inquiries: {e}")
 
-# --- TAB 3: ACTIVE CLAIMS ---
+# --- TAB 3: ACTIVE CLAIMS (ENHANCED QUEUE & OUTREACH AUDIT) ---
 with tabs[3]:
-    st.subheader("Active & Settled Claims Ledger")
+    st.subheader("💼 Active Claims & Outreach Tracking Ledger")
+    st.caption("Track pipeline progress from queue and contact through formal dispatch and final settlement.")
+
+    status_filter = st.selectbox(
+        "Filter by Lifecycle Stage",
+        ["All Active Stages", "approved (Queued for Outreach)", "contacted (Outreach Dispatched)", "opted_in (Authorized by Client)", "dispatched (Served to Legal)", "settled (Recovered)"],
+        key="filter_active_claims_status"
+    )
+
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id::text AS id, vertical, carrier_name, claimant_name, recovery_amount, fee_collected, status 
-                FROM leads WHERE status IN ('opted_in', 'dispatched', 'settled') ORDER BY updated_at DESC LIMIT 100;
-            """)
+            query = """
+                SELECT 
+                    id::text AS id,
+                    vertical,
+                    carrier_name,
+                    status,
+                    source_platform,
+                    username,
+                    claimant_name,
+                    claimant_email,
+                    claimant_phone,
+                    post_url,
+                    outreach_copy,
+                    estimated_compensation,
+                    recovery_amount,
+                    fee_collected,
+                    created_at,
+                    updated_at
+                FROM leads 
+                WHERE status IN ('approved', 'contacted', 'opted_in', 'dispatched', 'settled')
+            """
+            params = []
+            if status_filter != "All Active Stages":
+                st_code = status_filter.split(" ")[0]
+                query += " AND status = %s"
+                params.append(st_code)
+            query += " ORDER BY updated_at DESC LIMIT 150;"
+
+            cur.execute(query, tuple(params))
             claims_list = cur.fetchall()
         conn.close()
+
         if claims_list:
             df_claims = pd.DataFrame(claims_list)
-            m1, m2, m3 = st.columns(3)
+
+            # Compute channel summary display
+            def compute_channel(row):
+                src = row.get("source_platform") or "unknown"
+                if src == "reddit":
+                    return f"Reddit (u/{row.get('username') or 'anonymous'})"
+                elif src == "direct_inbound":
+                    return f"Direct Client ({row.get('claimant_email') or row.get('claimant_phone') or 'Direct'})"
+                elif src == "easyclaim_landing_page":
+                    return f"Landing Page ({row.get('claimant_email') or 'Portal'})"
+                return src
+
+            df_claims["dispatch_channel"] = df_claims.apply(compute_channel, axis=1)
+
+            # Portfolio Summary Metrics
+            m1, m2, m3, m4 = st.columns(4)
             tot_rec = df_claims["recovery_amount"].astype(float).sum()
             tot_fee = df_claims["fee_collected"].astype(float).sum()
-            m1.metric("Active Claims", len(df_claims))
-            m2.metric("Total Recovered", f"${tot_rec:.2f}")
-            m3.metric("Platform Fees (25%)", f"${tot_fee:.2f}")
-            st.dataframe(df_claims)
+            queued_count = len(df_claims[df_claims['status'] == 'approved'])
+            contacted_count = len(df_claims[df_claims['status'] == 'contacted'])
+
+            m1.metric("Displaying Claims", len(df_claims))
+            m2.metric("Queued for Outreach", queued_count)
+            m3.metric("Contacted (Pending Intake)", contacted_count)
+            m4.metric("Platform Fees Recovered (25%)", f"${tot_fee:.2f}")
+
+            # Primary Table
+            display_cols = ["id", "status", "vertical", "carrier_name", "dispatch_channel", "estimated_compensation", "recovery_amount", "updated_at"]
+            st.dataframe(df_claims[display_cols], use_container_width=True)
+
+            # Detailed Claim & Outreach Inspection Card
+            st.divider()
+            st.subheader("🔍 Outreach & Transmission Inspector")
+            
+            sel_claim_id = st.selectbox(
+                "Select Claim ID to Inspect Destination & Message Contents",
+                [c["id"] for c in claims_list],
+                key="sel_active_claim_inspect"
+            )
+            selected_claim = next(c for c in claims_list if c["id"] == sel_claim_id)
+
+            c_status = selected_claim.get("status")
+            claim_auth_url = f"https://dispute-admin.onrender.com/?claim_id={sel_claim_id}"
+            src_url = selected_claim.get("post_url")
+            platform = selected_claim.get("source_platform") or "Direct"
+
+            col_detail_l, col_detail_r = st.columns(2)
+
+            with col_detail_l:
+                st.markdown("#### Destination & Channel Verification")
+                st.markdown(f"**Dispute Vertical:** `{selected_claim.get('vertical')}`")
+                st.markdown(f"**Target Respondent:** `{selected_claim.get('carrier_name') or 'N/A'}`")
+                st.markdown(f"**Current Status:** `{c_status.upper()}`")
+                st.markdown(f"**Source Platform:** `{platform}`")
+
+                if src_url:
+                    st.markdown(f"🔗 **Where it is responding (Target Post):** [Open Original Discussion Thread]({src_url})")
+                    st.caption(f"`{src_url}`")
+                else:
+                    target_dest = selected_claim.get("claimant_email") or selected_claim.get("claimant_phone") or "Direct Portal Submission"
+                    st.markdown(f"📧 **Direct Recipient:** `{target_dest}`")
+
+                st.markdown(f"🛡️ **Unique Authorization URL:** [Open Claim Portal Card]({claim_auth_url})")
+                st.caption(f"`{claim_auth_url}`")
+
+            with col_detail_r:
+                st.markdown("#### Message Contents & Outreach Verbiage")
+                
+                if c_status == "approved":
+                    st.warning("⏳ **Status: Queued for Outreach.** This message is scheduled for delivery to the recipient above.")
+                elif c_status == "contacted":
+                    st.info("📨 **Status: Contacted.** Message delivered to target discussion/inbox. Awaiting claimant e-signature.")
+                elif c_status in ("opted_in", "dispatched"):
+                    st.success("✅ **Status: Authorized & Dispatched.** Client completed intake. Formal statutory demand served.")
+                elif c_status == "settled":
+                    rec = float(selected_claim.get("recovery_amount") or 0.0)
+                    fee = float(selected_claim.get("fee_collected") or (rec * 0.25))
+                    st.success(f"🎉 **Status: Settled.** Recovered: **${rec:.2f}** | Platform 25% Contingency Fee: **${fee:.2f}**")
+
+                msg_content = selected_claim.get("outreach_copy") or "No custom outreach copy recorded. Standard statutory representation template applied."
+                st.text_area(
+                    "Outreach Content (Exact verbiage sent or queued for delivery)",
+                    value=msg_content,
+                    height=140,
+                    disabled=True
+                )
+
+                if c_status == "approved":
+                    if st.button("🚀 Mark as Contacted (Confirm Dispatch)", key=f"mark_contacted_{sel_claim_id}"):
+                        conn = get_db()
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE leads SET status = 'contacted', updated_at = NOW() WHERE id::text = %s;", (sel_claim_id,))
+                        conn.close()
+                        st.success("Status updated to contacted.")
+                        st.rerun()
         else:
-            st.info("No active claims.")
+            st.info("No claims currently found matching this lifecycle stage.")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error loading active claims ledger: {e}")
 
 # --- TAB 4: WEBHOOK AUDIT ---
 with tabs[4]:
