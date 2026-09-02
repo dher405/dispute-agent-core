@@ -22,6 +22,9 @@ st.set_page_config(
 DATABASE_URL = os.getenv("DATABASE_URL")
 API_BASE = os.getenv("API_BASE_URL", "https://dispute-api-xyl7.onrender.com")
 
+def get_connection():
+    return get_db()
+
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     conn.autocommit = True
