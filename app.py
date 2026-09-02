@@ -922,7 +922,77 @@ with tabs[6]:
     # Section B: Database System Audit Logs
     st.divider()
     st.subheader("📜 Live Event Audit Log Stream")
-    
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 2, 2])
+    with col_ctrl1:
+        auto_refresh = st.toggle("Live Tail (Auto-Refresh)", value=True, key="audit_live_tail_toggle")
+    with col_ctrl2:
+        refresh_rate = st.selectbox(
+            "Refresh Interval",
+            options=[3, 5, 10, 30],
+            index=1,
+            format_func=lambda x: f"Every {x}s",
+            key="audit_refresh_interval_select"
+        )
+    with col_ctrl3:
+        log_level_filter = st.selectbox(
+            "Log Level",
+            ["ALL", "INFO", "WARNING", "ERROR", "CRITICAL"],
+            key="audit_log_level_select"
+        )
+    poll_interval = refresh_rate if auto_refresh else None
+    @st.fragment(run_every=poll_interval)
+    def render_tab6_live_stream(selected_level):
+        c_status, c_btn = st.columns([6, 1])
+        with c_btn:
+            if st.button("🔄 Refresh", use_container_width=True, key="btn_audit_refresh_now"):
+                st.rerun(scope="fragment")
+        try:
+            conn = get_connection()
+            with conn.cursor() as cur:
+                query = """
+                    SELECT 
+                        created_at,
+                        service_name,
+                        event_category,
+                        log_level,
+                        message,
+                        lead_id::text,
+                        metadata
+                    FROM system_audit_logs
+                """
+                params = []
+                if selected_level and selected_level != "ALL":
+                    query += " WHERE log_level = %s"
+                    params.append(selected_level)
+                query += " ORDER BY created_at DESC LIMIT 150;"
+                cur.execute(query, tuple(params) if params else ())
+                cols = [desc[0] for desc in cur.description]
+                rows = cur.fetchall()
+            conn.close()
+            import pandas as pd
+            df = pd.DataFrame(rows, columns=cols)
+            if df.empty:
+                st.info("No audit logs found matching criteria.")
+                return
+            with c_status:
+                st.caption(f"Last updated: {pd.Timestamp.now().strftime('%H:%M:%S UTC')} — Displaying {len(df)} most recent events")
+            st.dataframe(
+                df,
+                use_container_width=True,
+                column_config={
+                    "created_at": st.column_config.DatetimeColumn("Timestamp", format="YYYY-MM-DD HH:mm:ss"),
+                    "log_level": st.column_config.TextColumn("Level"),
+                    "service_name": st.column_config.TextColumn("Service"),
+                    "event_category": st.column_config.TextColumn("Category"),
+                    "message": st.column_config.TextColumn("Message", width="large"),
+                    "lead_id": st.column_config.TextColumn("Lead UUID"),
+                    "metadata": st.column_config.Column("Metadata JSON"),
+                },
+                hide_index=True
+            )
+        except Exception as e:
+            st.error(f"Error reading telemetry logs: {e}")
+    render_tab6_live_stream(log_level_filter)
     col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
     with col_f1:
         log_level_filter = st.selectbox("Log Level", ["ALL", "INFO", "WARN", "ERROR"], key="filter_log_level")
