@@ -349,6 +349,7 @@ with st.sidebar:
 tab_titles = [
     "📥 Ingestion Queue", 
     "✍️ Direct Manual Intake", 
+    "💬 Customer Inquiries", 
     "💼 Active Claims", 
     "📡 Webhook Audit", 
     "⚠️ Dead-Letter Queue", 
@@ -617,8 +618,42 @@ with tabs[1]:
                     except Exception as e:
                         st.error(f"Database insertion failed: {e}")
 
-# --- TAB 2: ACTIVE CLAIMS ---
-with tabs[2]:
+# --- TAB 2: CUSTOMER INQUIRIES (FROM LANDING PAGE) ---
+with tabs[7]:
+    st.subheader("💬 Inbound Contact Messages & Inquiries")
+    st.caption("Messages submitted through the public EasyClaim contact form.")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text AS id, sender_name, sender_email, subject, message, status, created_at FROM customer_inquiries ORDER BY created_at DESC LIMIT 50;")
+            inquiries = cur.fetchall()
+        conn.close()
+
+        if inquiries:
+            df_inq = pd.DataFrame(inquiries)
+            st.dataframe(df_inq[["created_at", "sender_name", "sender_email", "subject", "status"]])
+            
+            sel_inq_id = st.selectbox("Inspect Message", [i["id"] for i in inquiries], key="sel_inq")
+            sel_inq = next(i for i in inquiries if i["id"] == sel_inq_id)
+            
+            st.markdown(f"**From:** {sel_inq['sender_name']} (`{sel_inq['sender_email']}`)")
+            st.markdown(f"**Subject:** {sel_inq['subject']}")
+            st.text_area("Message Body", value=sel_inq['message'], height=120, disabled=True)
+            
+            if st.button("Mark as Read / Processed", key=f"read_{sel_inq_id}"):
+                conn = get_db()
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE customer_inquiries SET status = 'processed' WHERE id::text = %s;", (sel_inq_id,))
+                conn.close()
+                st.success("Marked as processed.")
+                st.rerun()
+        else:
+            st.info("No customer inquiries recorded.")
+    except Exception as e:
+        st.error(f"Error loading customer inquiries: {e}")
+
+# --- TAB 3: ACTIVE CLAIMS ---
+with tabs[7]:
     st.subheader("Active & Settled Claims Ledger")
     try:
         conn = get_db()
@@ -644,7 +679,7 @@ with tabs[2]:
         st.error(f"Error: {e}")
 
 # --- TAB 3: WEBHOOK AUDIT ---
-with tabs[3]:
+with tabs[7]:
     st.subheader("Inbound Carrier Telemetry Events")
     try:
         conn = get_db()
@@ -660,7 +695,7 @@ with tabs[3]:
         st.error(f"Error: {e}")
 
 # --- TAB 4: DLQ ---
-with tabs[4]:
+with tabs[7]:
     st.subheader("⚠️ Dead-Letter Queue (DLQ)")
     try:
         conn = get_db()
@@ -697,7 +732,7 @@ with tabs[4]:
         st.error(f"Error: {e}")
 
 # --- TAB 5: OPERATIONS MANUAL ---
-with tabs[5]:
+with tabs[7]:
     st.header("📖 Dispute Agent Platform: Field Manual & RBAC Guide")
     with st.expander("1. System Purpose & Plain-English Overview", expanded=True):
         st.markdown("""
@@ -721,8 +756,8 @@ with tabs[5]:
         """)
 
 # --- TAB 6: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
-if user_role == "super_admin" and len(tabs) > 6:
-    with tabs[6]:
+if user_role == "super_admin" and len(tabs) > 7:
+    with tabs[7]:
         st.subheader("👥 User Management & Role Provisioning")
         col_new_user, col_user_list = st.columns([1, 1.4])
 
