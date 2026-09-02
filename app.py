@@ -761,8 +761,15 @@ with tabs[3]:
                 st.markdown(f"**Source Platform:** `{platform}`")
 
                 if src_url:
-                    st.markdown(f"🔗 **Where it is responding (Target Post):** [Open Original Discussion Thread]({src_url})")
-                    st.caption(f"`{src_url}`")
+                    is_dummy = any(d in src_url.lower() for d in ["test_eval", "test_ua", "manual-intake", "direct-intake", "comments/$", "comments/"])
+                    if is_dummy:
+                        st.markdown("🔗 **Where it is responding (Target Post):**")
+                        st.caption("🧪 `Synthetic Test Lead` — *Origin was created during staging tests.*")
+                        st.markdown(f"[Preview Subreddit (r/unitedairlines)](https://www.reddit.com/r/unitedairlines/new/)")
+                    else:
+                        full_url = src_url if src_url.startswith("http") else f"https://{src_url}"
+                        st.markdown(f"🔗 **Where it is responding (Target Post):** [Open Live Discussion Thread]({full_url})")
+                        st.caption(f"`{full_url}`")
                 else:
                     target_dest = selected_claim.get("claimant_email") or selected_claim.get("claimant_phone") or "Direct Portal Submission"
                     st.markdown(f"📧 **Direct Recipient:** `{target_dest}`")
