@@ -767,8 +767,15 @@ with tabs[3]:
                     is_dummy = any(d in src_url.lower() for d in ["test_eval", "test_ua", "manual-intake", "direct-intake", "comments/$", "comments/"])
                     if is_dummy:
                         st.markdown("🔗 **Where it is responding (Target Post):**")
-                        st.caption("🧪 `Synthetic Test Lead` — *Origin was created during staging tests.*")
-                        st.markdown(f"[Preview Subreddit (r/unitedairlines)](https://www.reddit.com/r/unitedairlines/new/)")
+                        source_plat = selected_lead.get("source_platform", "Direct").capitalize()
+                        lead_uuid = selected_lead.get("id", "N/A")
+                        st.markdown(f"**{source_plat} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
+                        plat_src = selected_lead.get("source_platform", "Direct")
+                        lead_uuid = selected_lead.get("id", "N/A")
+                        st.markdown(f"**{plat_src.capitalize()} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
+                        target_url = selected_lead.get("post_url", "https://reddit.com")
+                        carrier_title = selected_lead.get("carrier_name", "Target Discussion Thread")
+                        st.markdown(f"Target Post URL: [{carrier_title}]({target_url})")
                     else:
                         full_url = src_url if src_url.startswith("http") else f"https://{src_url}"
                         st.markdown(f"🔗 **Where it is responding (Target Post):** [Open Live Discussion Thread]({full_url})")
