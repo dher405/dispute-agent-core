@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="Dispute Agent | Claims & Operations Desk",
+    page_title="Dispute Agent | Operations & Claims Desk",
     page_icon="⚖️",
     layout="wide"
 )
@@ -119,11 +119,11 @@ if claim_id_param:
                     st.markdown("#### 1. Claimant Identification & Contact")
                     col_u1, col_u2 = st.columns(2)
                     with col_u1:
-                        c_name = st.text_input("Full Legal Name *", placeholder="Jane Doe")
-                        c_email = st.text_input("Email Address (for demand copies) *", placeholder="jane@example.com")
+                        c_name = st.text_input("Full Legal Name *", value=claim.get("claimant_name") or "", placeholder="Jane Doe")
+                        c_email = st.text_input("Email Address (for demand copies) *", value=claim.get("claimant_email") or "", placeholder="jane@example.com")
                     with col_u2:
-                        c_phone = st.text_input("Mobile Phone (for instant SMS status alerts) *", placeholder="+13035550199")
-                        c_address = st.text_input("Mailing Address *", placeholder="123 Main St, Denver, CO 80202")
+                        c_phone = st.text_input("Mobile Phone (for instant SMS status alerts) *", value=claim.get("claimant_phone") or "", placeholder="+13035550199")
+                        c_address = st.text_input("Mailing Address *", value=claim.get("claimant_address") or "", placeholder="123 Main St, Denver, CO 80202")
 
                     st.markdown("#### 2. Incident & Account Verification")
                     col_i1, col_i2 = st.columns(2)
@@ -136,9 +136,9 @@ if claim_id_param:
                             c_pnr = None
                         else:
                             c_pnr = None
-                            c_acct = st.text_input("Lease / Account Reference", placeholder="Account or Property Ref")
+                            c_acct = st.text_input("Lease / Account Reference", value=claim.get("account_number") or "", placeholder="Account or Property Ref")
                     with col_i2:
-                        c_date = st.text_input("Date of Incident / Outage (YYYY-MM-DD) *", placeholder="2026-09-01")
+                        c_date = st.text_input("Date of Incident / Outage (YYYY-MM-DD) *", value=claim.get("incident_date") or "", placeholder="2026-09-01")
 
                     st.markdown("#### 3. Representation Agreement & E-Signature")
                     st.caption(
@@ -346,7 +346,14 @@ with st.sidebar:
         st.session_state.user_info = None
         st.rerun()
 
-tab_titles = ["📥 Ingestion Queue", "💼 Active Claims", "📡 Webhook Audit", "⚠️ Dead-Letter Queue", "📖 Operations Manual"]
+tab_titles = [
+    "📥 Ingestion Queue", 
+    "✍️ Direct Manual Intake", 
+    "💼 Active Claims", 
+    "📡 Webhook Audit", 
+    "⚠️ Dead-Letter Queue", 
+    "📖 Operations Manual"
+]
 if user_role == "super_admin":
     tab_titles.append("👥 User Administration")
 
@@ -396,7 +403,6 @@ with tabs[0]:
                 claim_auth_link = f"https://dispute-admin.onrender.com/?claim_id={selected_lead_id}"
                 raw_copy = selected_lead.get("outreach_copy") or ""
                 
-                # Defensive check: if copy starts like a vendor letter, reconstruct consumer copy
                 if any(p in raw_copy.lower() for p in ["dear ", "customer care", "i am writing to"]):
                     c_name = selected_lead.get("carrier_name") or "the provider"
                     c_amt = float(selected_lead.get("estimated_compensation") or 0.0)
@@ -443,8 +449,176 @@ with tabs[0]:
     except Exception as e:
         st.error(f"Error loading review queue: {e}")
 
-# --- TAB 1: ACTIVE CLAIMS ---
+# --- TAB 1: DIRECT MANUAL INTAKE (NEW) ---
 with tabs[1]:
+    st.subheader("✍️ Direct Manual Claim Ingestion & Scenario Builder")
+    st.caption("Create a dispute scenario when a consumer contacts you directly via email, phone, or referral.")
+
+    intake_mode = st.radio(
+        "Select Ingestion Method",
+        ["🤖 AI-Assisted Evaluation (Paste Client Grievance)", "📝 Explicit Field Configuration (Manual Entry)"],
+        horizontal=True
+    )
+
+    if intake_mode == "🤖 AI-Assisted Evaluation (Paste Client Grievance)":
+        with st.form("form_ai_manual_intake"):
+            st.markdown("#### Paste Consumer Grievance Details")
+            c_name_in = st.text_input("Customer Name", placeholder="e.g. David Herron")
+            c_contact_in = st.text_input("Customer Contact (Email or Phone)", placeholder="e.g. dave@example.com or +13035550199")
+            client_narrative = st.text_area(
+                "Incident Narrative / Dispute Details *",
+                placeholder="Example: My flight UA 949 from London to Denver was delayed 5 hours due to mechanical issues. United refused to pay cash compensation.",
+                height=160
+            )
+            submit_ai_intake = st.form_submit_button("⚡ Analyze Statutory Viability & Generate Case")
+
+            if submit_ai_intake:
+                if not client_narrative or len(client_narrative.strip()) < 20:
+                    st.error("Please provide sufficient narrative details regarding the disruption.")
+                else:
+                    with st.spinner("Analyzing statutory framework with Google Gemini..."):
+                        payload = {
+                            "source_platform": "direct_inbound",
+                            "platform_user_id": c_contact_in or "direct_client",
+                            "username": c_name_in or "Direct Client",
+                            "post_url": "https://disputeagent.internal/direct-intake",
+                            "raw_post_text": client_narrative.strip()
+                        }
+                        try:
+                            eval_res = requests.post(f"{API_BASE}/api/v1/leads/evaluate", json=payload, timeout=25)
+                            if eval_res.status_code == 201:
+                                res_data = eval_res.json()
+                                if res_data.get("status") == "staged":
+                                    new_lead = res_data["lead"]
+                                    lead_uuid = new_lead["id"]
+                                    direct_link = f"https://dispute-admin.onrender.com/?claim_id={lead_uuid}"
+                                    
+                                    # If customer details were provided, attach them to the lead record
+                                    if c_name_in or c_contact_in:
+                                        conn = get_db()
+                                        with conn.cursor() as cur:
+                                            cur.execute("""
+                                                UPDATE leads 
+                                                SET claimant_name = COALESCE(NULLIF(%s, ''), claimant_name),
+                                                    claimant_email = CASE WHEN %s LIKE '%%@%%' THEN %s ELSE claimant_email END,
+                                                    claimant_phone = CASE WHEN %s NOT LIKE '%%@%%' THEN %s ELSE claimant_phone END,
+                                                    updated_at = NOW()
+                                                WHERE id::text = %s;
+                                            """, (c_name_in, c_contact_in, c_contact_in, c_contact_in, c_contact_in, lead_uuid))
+                                        conn.close()
+
+                                    st.success("✅ Case successfully evaluated and staged in database!")
+                                    st.markdown(f"### Customer Authorization Link:\n`{direct_link}`")
+                                    
+                                    # Copyable email template
+                                    email_pitch = (
+                                        f"Hi {c_name_in or 'there'},\n\n"
+                                        f"We analyzed your disruption involving {new_lead.get('carrier_name')}. "
+                                        f"You are entitled to statutory compensation estimated at ${float(new_lead.get('estimated_compensation') or 0):.2f}.\n\n"
+                                        f"To have our legal desk compile and serve your formal statutory demand package, "
+                                        f"please authorize representation using our secure form here:\n{direct_link}\n\n"
+                                        f"Dispute Agent operates on a strict 100% No-Win, No-Fee contingency basis (0 upfront fees, 25% fee only upon recovery)."
+                                    )
+                                    st.text_area("Pre-formatted Client Outreach Message (Copy & Send)", value=email_pitch, height=180)
+                                else:
+                                    st.warning(f"Ineligible: {res_data.get('reason')}")
+                            else:
+                                st.error(f"API Error {eval_res.status_code}: {eval_res.text}")
+                        except Exception as e:
+                            st.error(f"Failed to communicate with API: {e}")
+
+    else:
+        with st.form("form_explicit_manual_intake"):
+            st.markdown("#### Explicit Dispute Parameters")
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                v_choice = st.selectbox("Dispute Vertical *", [
+                    ("flight_disruption", "✈️ Air Travel Disruption (US DOT Part 260 / UK261)"),
+                    ("isp_outage", "🌐 Telecom & ISP Outage (PUC Tariff SLA)"),
+                    ("security_deposit", "🏠 Security Deposit Non-Compliance (Statutory Penalties)"),
+                    ("class_action", "⚖️ Class Action & FTC Restitution")
+                ], format_func=lambda x: x[1])[0]
+                target_carrier = st.text_input("Target Entity / Vendor *", placeholder="e.g. United Airlines, Comcast, Landlord LLC")
+                incident_ref = st.text_input("Incident Reference (Flight #, Account #, or Lease Property)", placeholder="e.g. UA 949 or TKT-994812")
+                est_payout = st.number_input("Estimated Statutory Compensation ($) *", min_value=1.0, value=650.0, step=25.0)
+
+            with col_m2:
+                reg_citation = st.text_input("Statutory Regulatory Basis *", value="US DOT 14 CFR Part 260 / UK261")
+                client_full_name = st.text_input("Customer Name", placeholder="Jane Doe")
+                client_email = st.text_input("Customer Email", placeholder="jane@example.com")
+                client_phone = st.text_input("Customer Phone", placeholder="+13035550199")
+
+            dispute_reasoning = st.text_area(
+                "Legal & Factual Disruption Justification *",
+                value="Technical operational delay exceeding mandatory statutory thresholds without extraordinary excludable circumstances.",
+                height=100
+            )
+
+            submit_explicit = st.form_submit_button("🚀 Create Dispute Case & Generate Client Link")
+
+            if submit_explicit:
+                if not target_carrier or not reg_citation:
+                    st.error("Target Entity and Statutory Legal Basis are required.")
+                else:
+                    try:
+                        conn = get_db()
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO leads (
+                                    vertical,
+                                    source_platform,
+                                    platform_user_id,
+                                    username,
+                                    post_url,
+                                    raw_post_text,
+                                    carrier_name,
+                                    incident_identifier,
+                                    estimated_compensation,
+                                    regulatory_framework,
+                                    ai_reasoning,
+                                    claimant_name,
+                                    claimant_email,
+                                    claimant_phone,
+                                    status
+                                ) VALUES (
+                                    %s, 'direct_inbound', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review'
+                                ) RETURNING id::text;
+                            """, (
+                                v_choice,
+                                client_email or client_phone or "direct_intake",
+                                client_full_name or "Direct Client",
+                                "https://disputeagent.internal/manual-intake",
+                                dispute_reasoning,
+                                target_carrier,
+                                incident_ref,
+                                est_payout,
+                                reg_citation,
+                                dispute_reasoning,
+                                client_full_name,
+                                client_email,
+                                client_phone
+                            ))
+                            new_case_id = cur.fetchone()["id"]
+                        conn.close()
+
+                        client_url = f"https://dispute-admin.onrender.com/?claim_id={new_case_id}"
+                        st.success("✅ Dispute scenario created successfully!")
+                        st.markdown(f"### Client Onboarding & Authorization URL:\n`{client_url}`")
+                        
+                        pitch = (
+                            f"Hi {client_full_name or 'there'},\n\n"
+                            f"We have staged your formal recovery claim against {target_carrier} under {reg_citation} "
+                            f"(Valuation: ${est_payout:.2f}).\n\n"
+                            f"To sign your representation authorization and trigger the formal legal demand letter, "
+                            f"please verify your details here:\n{client_url}\n\n"
+                            f"Platform terms: 100% contingency basis (0 upfront, 25% fee upon liquidated payout)."
+                        )
+                        st.text_area("Client Message (Ready to Email or SMS)", value=pitch, height=180)
+                    except Exception as e:
+                        st.error(f"Database insertion failed: {e}")
+
+# --- TAB 2: ACTIVE CLAIMS ---
+with tabs[2]:
     st.subheader("Active & Settled Claims Ledger")
     try:
         conn = get_db()
@@ -469,8 +643,8 @@ with tabs[1]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 2: WEBHOOK AUDIT ---
-with tabs[2]:
+# --- TAB 3: WEBHOOK AUDIT ---
+with tabs[3]:
     st.subheader("Inbound Carrier Telemetry Events")
     try:
         conn = get_db()
@@ -485,8 +659,8 @@ with tabs[2]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 3: DLQ ---
-with tabs[3]:
+# --- TAB 4: DLQ ---
+with tabs[4]:
     st.subheader("⚠️ Dead-Letter Queue (DLQ)")
     try:
         conn = get_db()
@@ -522,8 +696,8 @@ with tabs[3]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 4: OPERATIONS MANUAL ---
-with tabs[4]:
+# --- TAB 5: OPERATIONS MANUAL ---
+with tabs[5]:
     st.header("📖 Dispute Agent Platform: Field Manual & RBAC Guide")
     with st.expander("1. System Purpose & Plain-English Overview", expanded=True):
         st.markdown("""
@@ -546,9 +720,9 @@ with tabs[4]:
         * `auditor`: Read-only access to portfolio ledgers and webhook telemetry.
         """)
 
-# --- TAB 5: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
-if user_role == "super_admin" and len(tabs) > 5:
-    with tabs[5]:
+# --- TAB 6: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
+if user_role == "super_admin" and len(tabs) > 6:
+    with tabs[6]:
         st.subheader("👥 User Management & Role Provisioning")
         col_new_user, col_user_list = st.columns([1, 1.4])
 
