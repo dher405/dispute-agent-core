@@ -25,11 +25,12 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+PUBLIC_API_URL = os.getenv("API_BASE_URL", "https://dispute-api-xyl7.onrender.com")
 
 app = FastAPI(
     title="EasyClaim Autonomous Recovery Engine",
     description="Statutory micro-dispute resolution, multi-vendor ingestion, and telemetry logging.",
-    version="3.5.0"
+    version="3.6.0"
 )
 
 app.add_middleware(
@@ -270,7 +271,7 @@ def sweep_reddit_vendor():
         try:
             res = requests.get(
                 f"https://www.reddit.com/r/{sub}/new.json?limit=10",
-                headers={"User-Agent": "DisputeAgentCore/3.5"},
+                headers={"User-Agent": "DisputeAgentCore/3.6"},
                 timeout=10
             )
             if res.status_code == 200:
@@ -544,7 +545,7 @@ def process_outbound_queue():
                         client_secret=reddit_client_secret,
                         username=reddit_username,
                         password=reddit_password,
-                        user_agent=get_db_setting("REDDIT_USER_AGENT", "EasyClaimAdvocate/3.5")
+                        user_agent=get_db_setting("REDDIT_USER_AGENT", "EasyClaimAdvocate/3.6")
                     )
                     submission = reddit.submission(url=post_url)
                     comment = submission.reply(outreach_text)
@@ -584,6 +585,36 @@ def process_outbound_queue():
                 lead_id=lead_id
             )
 
+# =====================================================================
+# RENDER ANTI-SLEEP IN-PROCESS KEEP-ALIVE DAEMON
+# =====================================================================
+
+def render_keep_alive_daemon():
+    """Dispatches an HTTP GET to /health every 9 minutes to prevent Render idle spin-down."""
+    time.sleep(30)
+    health_url = f"{PUBLIC_API_URL.rstrip('/')}/health"
+    logger.info(f"[KEEP-ALIVE] Initialized internal sentinel target: {health_url}")
+
+    while True:
+        try:
+            res = requests.get(health_url, timeout=15)
+            log_system_event(
+                "keep_alive_sentinel",
+                "KEEP_ALIVE_PING",
+                "INFO",
+                f"Keep-alive self-ping dispatched to {health_url} (HTTP {res.status_code}) to prevent instance sleep.",
+                metadata={"status_code": res.status_code, "response": res.text[:50]}
+            )
+        except Exception as ping_err:
+            log_system_event(
+                "keep_alive_sentinel",
+                "PING_WARNING",
+                "WARN",
+                f"Keep-alive self-ping encountered network glitch: {ping_err}"
+            )
+        # Sleep for 9 minutes (Render free tier timeout is 15 minutes)
+        time.sleep(540)
+
 def master_autonomous_cycle():
     """Master background loop running sweeps and outbound processing every 60 seconds."""
     logger.info("[ENGINE] Master Multi-Vendor Ingestion & Outreach Engine Started (60s Cadence).")
@@ -616,10 +647,14 @@ def master_autonomous_cycle():
 
 @app.on_event("startup")
 def startup_event():
-    """Spawns unified background thread on FastAPI application startup."""
-    t = threading.Thread(target=master_autonomous_cycle, daemon=True, name="DisputeAgentMasterEngine")
-    t.start()
-    logger.info("[STARTUP] Unified Multi-Vendor Engine background thread initialized.")
+    """Spawns unified background thread and keep-alive thread on FastAPI application startup."""
+    t_engine = threading.Thread(target=master_autonomous_cycle, daemon=True, name="DisputeAgentMasterEngine")
+    t_engine.start()
+
+    t_keepalive = threading.Thread(target=render_keep_alive_daemon, daemon=True, name="RenderKeepAliveSentinel")
+    t_keepalive.start()
+
+    logger.info("[STARTUP] Ingestion engine and Anti-Sleep Sentinel threads initialized.")
 
 # =====================================================================
 # PUBLIC LANDING PAGE (EasyClaim Consumer Portal)
@@ -638,7 +673,7 @@ def serve_landing_page():
 
 @app.get("/health", status_code=status.HTTP_200_OK)
 def health_check():
-    return {"status": "healthy", "service": "dispute-api", "brand": "EasyClaim"}
+    return {"status": "healthy", "service": "dispute-api", "brand": "EasyClaim", "keep_alive": True}
 
 @app.get("/api/v1/system/health-check", status_code=status.HTTP_200_OK)
 def run_system_health_check():
@@ -694,6 +729,7 @@ def run_system_health_check():
         "status": "operational",
         "cadence_seconds": int(get_db_setting("POLL_INTERVAL_SECONDS", "60")),
         "vendors_monitored": ["Reddit (Subreddits)", "Bluesky (AT Protocol)", "Hacker News (Outage Stories)"],
+        "anti_sleep_sentinel": "active (9-minute self-ping loop)",
         "telemetry_logging": "active"
     }
 
