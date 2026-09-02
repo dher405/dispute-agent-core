@@ -1,11 +1,12 @@
 import os
+import time
 import json
 import logging
 from typing import Optional, Dict, Any, List
 from decimal import Decimal
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, status, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import psycopg2
@@ -13,8 +14,8 @@ from psycopg2.extras import RealDictCursor
 from google import genai
 from google.genai import types
 
-from sms_dispatcher import notify_claim_event
-from carrier_dispatcher import dispatch_demand_email
+from sms_dispatcher import notify_claim_event, get_setting as get_sms_setting
+from carrier_dispatcher import dispatch_demand_email, get_setting as get_carrier_setting
 from letter_generator import StatutoryDemandGenerator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s")
@@ -25,8 +26,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 app = FastAPI(
     title="EasyClaim Autonomous Recovery Engine",
-    description="Statutory micro-dispute resolution and recovery portal.",
-    version="3.0.0"
+    description="Statutory micro-dispute resolution, recovery portal, and diagnostic telemetry.",
+    version="3.1.0"
 )
 
 app.add_middleware(
@@ -45,6 +46,29 @@ def get_db():
         yield conn
     finally:
         conn.close()
+
+def log_system_event(service_name: str, event_category: str, log_level: str, message: str, lead_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
+    """Centralized database-backed operational logging."""
+    if not DATABASE_URL:
+        return
+    try:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO system_audit_logs (service_name, event_category, log_level, message, lead_id, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s);
+            """, (
+                service_name,
+                event_category,
+                log_level,
+                message,
+                lead_id,
+                json.dumps(metadata or {})
+            ))
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to record audit log: {e}")
 
 # --- Schemas ---
 
@@ -102,33 +126,17 @@ class SettlementPayload(BaseModel):
 # --- Background Worker Dispatchers ---
 
 def trigger_carrier_demand_pipeline(lead_id: str):
-    """Compiles the statutory demand letter PDF and delivers it to the target entity's legal desk."""
+    """Compiles statutory PDF demand and serves to target entity legal desk."""
     try:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT 
-                    id::text AS id,
-                    vertical,
-                    carrier_name,
-                    incident_identifier,
-                    account_number,
-                    outage_duration_hours,
-                    tier_speed_tier,
-                    estimated_compensation,
-                    recovery_amount,
-                    regulatory_framework,
-                    ai_reasoning,
-                    status,
-                    claimant_name,
-                    claimant_email,
-                    claimant_phone,
-                    claimant_address,
-                    pnr,
-                    incident_date,
-                    digital_signature
-                FROM leads
-                WHERE id::text = %s;
+                    id::text AS id, vertical, carrier_name, incident_identifier, account_number,
+                    outage_duration_hours, tier_speed_tier, estimated_compensation, recovery_amount,
+                    regulatory_framework, ai_reasoning, status, claimant_name, claimant_email,
+                    claimant_phone, claimant_address, pnr, incident_date, digital_signature
+                FROM leads WHERE id::text = %s;
             """, (lead_id,))
             lead = cur.fetchone()
 
@@ -139,29 +147,23 @@ def trigger_carrier_demand_pipeline(lead_id: str):
             success, note = dispatch_demand_email(lead, pdf_bytes)
 
             if success:
-                cur.execute("""
-                    UPDATE leads 
-                    SET status = 'dispatched', updated_at = NOW() 
-                    WHERE id::text = %s;
-                """, (lead_id,))
-                
+                cur.execute("UPDATE leads SET status = 'dispatched', updated_at = NOW() WHERE id::text = %s;", (lead_id,))
                 cur.execute("""
                     INSERT INTO carrier_inbound_events (
                         lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s);
                 """, (
-                    lead_id,
-                    lead.get("carrier_name") or "Carrier",
-                    lead.get("vertical") or "flight_disruption",
-                    "demand_dispatched",
-                    0.00,
-                    f"PDF demand served: {note}",
-                    psycopg2.extras.Json({"note": note})
+                    lead_id, lead.get("carrier_name") or "Carrier", lead.get("vertical") or "flight_disruption",
+                    "demand_dispatched", 0.00, f"PDF demand served: {note}", psycopg2.extras.Json({"note": note})
                 ))
                 conn.commit()
+                log_system_event("carrier_dispatcher", "DISPATCH_SUCCESS", "INFO", f"Demand served to {lead.get('carrier_name')}: {note}", lead_id=lead_id)
+            else:
+                log_system_event("carrier_dispatcher", "DISPATCH_FAILED", "ERROR", f"Demand transmission failed: {note}", lead_id=lead_id)
         conn.close()
     except Exception as e:
         logger.error(f"[BACKGROUND TASK ERROR] Demand pipeline error: {e}")
+        log_system_event("carrier_dispatcher", "EXCEPTION", "ERROR", str(e), lead_id=lead_id)
 
 # --- AI Legal Assessment Gateway ---
 
@@ -169,7 +171,14 @@ def evaluate_multi_vertical_signal(text: str) -> Dict[str, Any]:
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = f"""
 You are the Lead Consumer Recovery Advocate for EasyClaim.
-Analyze the following consumer grievance to verify statutory compensation, bill credits, or liquidated penalties.
+Analyze the consumer grievance to verify statutory compensation, bill credits, or liquidated penalties.
+
+Core Rules for outreach_copy:
+1. THIS MESSAGE IS WRITTEN TO THE AFFECTED CONSUMER / PASSENGER, NOT TO THE AIRLINE OR VENDOR.
+2. NEVER start with 'Dear [Carrier] Customer Care' or 'I am writing to claim'.
+3. Address the consumer directly ('You may be entitled to...', 'Because [Carrier] delayed flight [Flight]...').
+4. Clearly state what statutory regulation protects them and the exact estimated dollar amount owed to them.
+5. Keep outreach_copy under 220 characters so the authorization tracking link can be appended cleanly.
 
 Verticals & Default Statutory Baselines:
 - 'flight_disruption': UK261/EU261 (£520 / €600 / ~$650 USD for delays >3hrs from UK/EU), US DOT 14 CFR Part 260 (mandatory cash refunds for cancellations or significant delays >3hrs domestic, >6hrs international; standard $650.00 baseline if ticket unstated).
@@ -197,10 +206,7 @@ Return strictly valid JSON matching this exact structure:
         response = client.models.generate_content(
             model="gemini-3.6-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
         )
         return json.loads(response.text)
     except Exception as e:
@@ -208,10 +214,7 @@ Return strictly valid JSON matching this exact structure:
         fallback = client.models.generate_content(
             model="gemini-2.0-flash",
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
         )
         return json.loads(fallback.text)
 
@@ -295,7 +298,6 @@ def serve_landing_page():
     }
     .btn-nav:hover { background: var(--primary-hover); }
 
-    /* Hero Section */
     .hero {
       padding: 4.5rem 1.5rem 3.5rem;
       text-align: center;
@@ -326,7 +328,6 @@ def serve_landing_page():
       margin: 0 auto 2rem;
     }
 
-    /* Grid Sections */
     .container { max-width: 1200px; margin: 0 auto; padding: 3rem 1.5rem; }
     .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; }
     .card {
@@ -341,7 +342,6 @@ def serve_landing_page():
     .card p { color: var(--slate-600); font-size: 0.95rem; }
     .stat-pill { font-size: 0.8rem; font-weight: 700; color: var(--primary); background: #eff6ff; padding: 0.2rem 0.6rem; border-radius: 4px; display: inline-block; margin-top: 1rem; }
 
-    /* Intake Section */
     .form-section {
       background: var(--slate-50);
       border-top: 1px solid var(--border);
@@ -398,7 +398,6 @@ def serve_landing_page():
     }
     .btn-submit:hover { background: var(--primary-hover); }
 
-    /* Contact Section */
     .contact-container {
       max-width: 780px;
       margin: 0 auto;
@@ -437,7 +436,6 @@ def serve_landing_page():
       <a href="/" class="logo">⚖️ Easy<span>Claim</span></a>
       <div class="nav-links">
         <a href="#about">About</a>
-        <a href="#verticals">Coverage</a>
         <a href="#contact">Contact Us</a>
         <a href="#claim" class="btn-nav">File a Claim</a>
       </div>
@@ -586,7 +584,6 @@ def serve_landing_page():
   </footer>
 
   <script>
-    // Claim Submission Form Handler
     document.getElementById('claim-form').addEventListener('submit', async function(e) {
       e.preventDefault();
       const btn = document.getElementById('submit-btn');
@@ -637,7 +634,6 @@ def serve_landing_page():
       }
     });
 
-    // Contact Form Handler
     document.getElementById('contact-form').addEventListener('submit', async function(e) {
       e.preventDefault();
       const btn = document.getElementById('contact-btn');
@@ -683,16 +679,142 @@ def serve_landing_page():
 """
 
 # =====================================================================
-# API ENDPOINTS
+# SYSTEM DIAGNOSTIC & TELEMETRY API
 # =====================================================================
 
 @app.get("/health", status_code=status.HTTP_200_OK)
 def health_check():
     return {"status": "healthy", "service": "dispute-api", "brand": "EasyClaim"}
 
+@app.get("/api/v1/system/health-check", status_code=status.HTTP_200_OK)
+def run_system_health_check():
+    """Performs an end-to-end active probe of DB, Gemini AI, and Vendor API configurations."""
+    results: Dict[str, Any] = {
+        "timestamp": time.time(),
+        "overall_status": "healthy",
+        "probes": {}
+    }
+
+    # 1. PostgreSQL Probe
+    t0 = time.time()
+    try:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 AS alive;")
+            cur.fetchone()
+        conn.close()
+        db_latency_ms = round((time.time() - t0) * 1000, 2)
+        results["probes"]["database"] = {
+            "status": "operational",
+            "latency_ms": db_latency_ms,
+            "message": "Render PostgreSQL responding normally."
+        }
+    except Exception as e:
+        results["overall_status"] = "degraded"
+        results["probes"]["database"] = {"status": "error", "message": str(e)}
+
+    # 2. Google Gemini Probe
+    t0 = time.time()
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        res = client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents="ping",
+            config=types.GenerateContentConfig(temperature=0.0)
+        )
+        ai_latency_ms = round((time.time() - t0) * 1000, 2)
+        results["probes"]["gemini_ai"] = {
+            "status": "operational",
+            "latency_ms": ai_latency_ms,
+            "message": f"Model responding (Token chars: {len(res.text or '')})"
+        }
+    except Exception as e:
+        results["overall_status"] = "degraded"
+        results["probes"]["gemini_ai"] = {"status": "error", "message": str(e)}
+
+    # 3. Twilio SMS Probe
+    tw_sid = get_sms_setting("TWILIO_ACCOUNT_SID")
+    tw_token = get_sms_setting("TWILIO_AUTH_TOKEN")
+    tw_from = get_sms_setting("TWILIO_PHONE_NUMBER")
+    if tw_sid and tw_token and tw_from:
+        results["probes"]["twilio_sms"] = {
+            "status": "operational",
+            "configured": True,
+            "message": f"Active SID: {tw_sid[:6]}... Number: {tw_from}"
+        }
+    else:
+        results["probes"]["twilio_sms"] = {
+            "status": "warning",
+            "configured": False,
+            "message": "Twilio credentials unset. Operating in Dry-Run mode."
+        }
+
+    # 4. Carrier Demand SMTP Probe
+    smtp_host = get_carrier_setting("SMTP_HOST", "smtp.gmail.com")
+    smtp_user = get_carrier_setting("SMTP_USER", "")
+    smtp_pass = get_carrier_setting("SMTP_PASS", "")
+    if smtp_user and smtp_pass:
+        results["probes"]["smtp_dispatcher"] = {
+            "status": "operational",
+            "configured": True,
+            "message": f"Host: {smtp_host} User: {smtp_user}"
+        }
+    else:
+        results["probes"]["smtp_dispatcher"] = {
+            "status": "warning",
+            "configured": False,
+            "message": "SMTP credentials unset. Operating in Dry-Run simulation mode."
+        }
+
+    # 5. Social Ingestion Configuration
+    try:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM system_settings WHERE key = 'MONITORED_SUBREDDITS';")
+            sub_res = cur.fetchone()
+        conn.close()
+        sub_list = sub_res["value"].split(",") if sub_res else []
+        results["probes"]["social_ingestion"] = {
+            "status": "operational",
+            "active_subreddits_count": len(sub_list),
+            "target_subreddits": sub_list[:5]
+        }
+    except Exception as e:
+        results["probes"]["social_ingestion"] = {"status": "warning", "message": str(e)}
+
+    log_system_event("health_monitor", "DIAGNOSTIC_PROBE", "INFO", f"System health probe executed: {results['overall_status']}")
+    return results
+
+@app.get("/api/v1/system/audit-logs", status_code=status.HTTP_200_OK)
+def get_audit_logs(
+    level: Optional[str] = Query(None),
+    limit: int = Query(50, le=200),
+    conn=Depends(get_db)
+):
+    query = """
+    SELECT 
+        id::text AS id, service_name, event_category, log_level, message,
+        lead_id::text AS lead_id, metadata, created_at
+    FROM system_audit_logs
+    """
+    params = []
+    if level:
+        query += " WHERE log_level = %s"
+        params.append(level.upper())
+    query += " ORDER BY created_at DESC LIMIT %s;"
+    params.append(limit)
+
+    with conn.cursor() as cur:
+        cur.execute(query, tuple(params))
+        logs = cur.fetchall()
+    return logs
+
+# =====================================================================
+# TRANSACTIONAL WORKFLOW ENDPOINTS
+# =====================================================================
+
 @app.post("/api/v1/claims/portal-intake", status_code=status.HTTP_201_CREATED)
 def portal_direct_intake(payload: DirectClaimIntakePayload, background_tasks: BackgroundTasks, conn=Depends(get_db)):
-    """Receives self-service claim from EasyClaim landing page, evaluates, stores, and triggers demands."""
     eval_text = f"Claim against {payload.carrier_name} for {payload.vertical}: {payload.incident_description}"
     eval_result = evaluate_multi_vertical_signal(eval_text)
 
@@ -702,25 +824,10 @@ def portal_direct_intake(payload: DirectClaimIntakePayload, background_tasks: Ba
 
     query = """
     INSERT INTO leads (
-        vertical,
-        source_platform,
-        platform_user_id,
-        username,
-        post_url,
-        raw_post_text,
-        carrier_name,
-        incident_identifier,
-        account_number,
-        incident_date,
-        estimated_compensation,
-        regulatory_framework,
-        ai_reasoning,
-        claimant_name,
-        claimant_email,
-        claimant_phone,
-        claimant_address,
-        digital_signature,
-        status
+        vertical, source_platform, platform_user_id, username, post_url, raw_post_text,
+        carrier_name, incident_identifier, account_number, incident_date, estimated_compensation,
+        regulatory_framework, ai_reasoning, claimant_name, claimant_email, claimant_phone,
+        claimant_address, digital_signature, status
     ) VALUES (
         %s, 'easyclaim_landing_page', %s, %s, 'https://dispute-api-xyl7.onrender.com', %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'opted_in'
@@ -729,29 +836,17 @@ def portal_direct_intake(payload: DirectClaimIntakePayload, background_tasks: Ba
 
     with conn.cursor() as cur:
         cur.execute(query, (
-            payload.vertical,
-            payload.claimant_email,
-            payload.claimant_name,
-            payload.incident_description,
-            payload.carrier_name,
-            payload.incident_identifier,
-            payload.account_number or payload.incident_identifier,
-            payload.incident_date,
-            est_val,
-            framework,
-            reasoning,
-            payload.claimant_name,
-            payload.claimant_email,
-            payload.claimant_phone,
-            payload.claimant_address,
-            payload.digital_signature
+            payload.vertical, payload.claimant_email, payload.claimant_name, payload.incident_description,
+            payload.carrier_name, payload.incident_identifier, payload.account_number or payload.incident_identifier,
+            payload.incident_date, est_val, framework, reasoning, payload.claimant_name, payload.claimant_email,
+            payload.claimant_phone, payload.claimant_address, payload.digital_signature
         ))
         inserted = cur.fetchone()
         conn.commit()
 
     new_id = inserted["id"]
+    log_system_event("portal_intake", "SELF_SERVICE_CLAIM", "INFO", f"New self-service claim filed against {payload.carrier_name}", lead_id=new_id)
 
-    # Trigger asynchronous legal demand compilation and SMS notification
     if payload.claimant_phone:
         background_tasks.add_task(notify_claim_event, new_id, "opt_in_confirmation")
     background_tasks.add_task(trigger_carrier_demand_pipeline, new_id)
@@ -766,7 +861,6 @@ def portal_direct_intake(payload: DirectClaimIntakePayload, background_tasks: Ba
 
 @app.post("/api/v1/contact", status_code=status.HTTP_201_CREATED)
 def submit_contact_inquiry(payload: ContactMessagePayload, conn=Depends(get_db)):
-    """Receives general inquiry message from landing page contact form."""
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO customer_inquiries (sender_name, sender_email, subject, message)
@@ -776,6 +870,7 @@ def submit_contact_inquiry(payload: ContactMessagePayload, conn=Depends(get_db))
         res = cur.fetchone()
         conn.commit()
 
+    log_system_event("contact_desk", "INBOUND_MESSAGE", "INFO", f"Message from {payload.sender_name} <{payload.sender_email}>: {payload.subject}")
     return {"status": "received", "inquiry_id": res["id"]}
 
 @app.post("/api/v1/leads/evaluate", status_code=status.HTTP_201_CREATED)
@@ -783,6 +878,7 @@ def intake_and_evaluate(payload: RawSignalPayload, conn=Depends(get_db)):
     eval_result = evaluate_multi_vertical_signal(payload.raw_post_text)
     
     if not eval_result.get("is_viable", False):
+        log_system_event("gemini_engine", "EVALUATE_DISMISSED", "INFO", f"Ignored non-viable post from {payload.source_platform}")
         return {"status": "ignored", "reason": "No viable statutory or tariff violation detected."}
 
     query = """
@@ -795,16 +891,10 @@ def intake_and_evaluate(payload: RawSignalPayload, conn=Depends(get_db)):
     """
     params = (
         eval_result.get("vertical", "flight_disruption"),
-        payload.source_platform,
-        payload.platform_user_id,
-        payload.username,
-        payload.post_url,
-        payload.raw_post_text,
-        eval_result.get("carrier_name"),
-        eval_result.get("incident_identifier"),
-        eval_result.get("estimated_compensation", 0.00),
-        eval_result.get("regulatory_framework"),
-        eval_result.get("ai_reasoning"),
+        payload.source_platform, payload.platform_user_id, payload.username,
+        payload.post_url, payload.raw_post_text, eval_result.get("carrier_name"),
+        eval_result.get("incident_identifier"), eval_result.get("estimated_compensation", 0.00),
+        eval_result.get("regulatory_framework"), eval_result.get("ai_reasoning"),
         eval_result.get("outreach_copy")
     )
 
@@ -813,6 +903,8 @@ def intake_and_evaluate(payload: RawSignalPayload, conn=Depends(get_db)):
         inserted_lead = cur.fetchone()
         conn.commit()
 
+    new_id = inserted_lead["id"]
+    log_system_event("ingestion_worker", "LEAD_STAGED", "INFO", f"Staged {inserted_lead['vertical']} against {inserted_lead['carrier_name']}", lead_id=new_id)
     return {"status": "staged", "lead": inserted_lead}
 
 @app.get("/api/v1/leads")
@@ -842,8 +934,7 @@ def get_claim_tracking(lead_id: str, conn=Depends(get_db)):
                 id::text AS id, vertical, carrier_name, incident_identifier, account_number,
                 estimated_compensation, recovery_amount, fee_collected, regulatory_framework,
                 status, created_at, updated_at
-            FROM leads
-            WHERE id::text = %s;
+            FROM leads WHERE id::text = %s;
         """, (lead_id,))
         claim = cur.fetchone()
 
@@ -873,6 +964,8 @@ def submit_claim(payload: ClaimSubmissionPayload, background_tasks: BackgroundTa
     if not updated:
         raise HTTPException(status_code=404, detail="Lead ID not found.")
 
+    log_system_event("claims_gateway", "OPT_IN_SUBMITTED", "INFO", f"Claim authorized by {payload.claimant_name}", lead_id=payload.lead_id)
+
     if payload.claimant_phone:
         background_tasks.add_task(notify_claim_event, payload.lead_id, "opt_in_confirmation")
     background_tasks.add_task(trigger_carrier_demand_pipeline, payload.lead_id)
@@ -900,6 +993,7 @@ def settle_claim(payload: SettlementPayload, background_tasks: BackgroundTasks, 
     if not settled:
         raise HTTPException(status_code=404, detail="Lead ID not found.")
 
+    log_system_event("settlement_engine", "SETTLED_RECORDED", "INFO", f"Claim settled for ${payload.recovery_amount} (Fee: ${fee})", lead_id=payload.lead_id)
     background_tasks.add_task(notify_claim_event, payload.lead_id, "settlement_alert")
 
     return {
@@ -933,13 +1027,8 @@ def inbound_carrier_response(payload: CarrierWebhookPayload, background_tasks: B
         ) VALUES (%s, %s, %s, %s, %s, %s, %s);
         """
         cur.execute(audit_query, (
-            matched_lead_id,
-            payload.carrier_name,
-            payload.vertical,
-            payload.decision,
-            float(payload.payout_offered),
-            payload.resolution_notes,
-            json.dumps(payload.raw_metadata)
+            matched_lead_id, payload.carrier_name, payload.vertical, payload.decision,
+            float(payload.payout_offered), payload.resolution_notes, json.dumps(payload.raw_metadata)
         ))
 
         if matched_lead_id:
@@ -947,19 +1036,17 @@ def inbound_carrier_response(payload: CarrierWebhookPayload, background_tasks: B
                 recovery = payload.payout_offered
                 contingency_fee = (recovery * Decimal("0.25")).quantize(Decimal("0.01"))
                 
-                update_query = """
-                UPDATE leads
-                SET status = 'settled', recovery_amount = %s, fee_collected = %s, updated_at = NOW()
-                WHERE id::text = %s;
-                """
-                cur.execute(update_query, (recovery, contingency_fee, matched_lead_id))
+                cur.execute("""
+                    UPDATE leads
+                    SET status = 'settled', recovery_amount = %s, fee_collected = %s, updated_at = NOW()
+                    WHERE id::text = %s;
+                """, (recovery, contingency_fee, matched_lead_id))
                 background_tasks.add_task(notify_claim_event, matched_lead_id, "settlement_alert")
+                log_system_event("webhook_engine", "CARRIER_SETTLEMENT_APPROVED", "INFO", f"Settlement webhook tender of ${recovery} processed.", lead_id=matched_lead_id)
 
             elif payload.decision == "rejected":
-                cur.execute(
-                    "UPDATE leads SET status = 'rejected', updated_at = NOW() WHERE id::text = %s;",
-                    (matched_lead_id,)
-                )
+                cur.execute("UPDATE leads SET status = 'rejected', updated_at = NOW() WHERE id::text = %s;", (matched_lead_id,))
+                log_system_event("webhook_engine", "CARRIER_REJECTION", "WARN", f"Respondent rejected demand.", lead_id=matched_lead_id)
         conn.commit()
 
     return {

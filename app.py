@@ -1,5 +1,6 @@
 import os
 import io
+import time
 import streamlit as st
 import requests
 import pandas as pd
@@ -13,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(
-    page_title="Dispute Agent | Claims & Operations Desk",
+    page_title="Dispute Agent | Operations & Claims Desk",
     page_icon="⚖️",
     layout="wide"
 )
@@ -73,6 +74,18 @@ def ensure_database_schema():
                     subject VARCHAR(255),
                     message TEXT NOT NULL,
                     status VARCHAR(50) DEFAULT 'unread',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_audit_logs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    service_name VARCHAR(50) NOT NULL,
+                    event_category VARCHAR(50) NOT NULL,
+                    log_level VARCHAR(20) DEFAULT 'INFO',
+                    message TEXT NOT NULL,
+                    lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+                    metadata JSONB DEFAULT '{}'::jsonb,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
@@ -363,7 +376,8 @@ tab_titles = [
     "💬 Customer Inquiries", 
     "💼 Active Claims", 
     "📡 Webhook Audit", 
-    "⚠️ Dead-Letter Queue", 
+    "⚠️ Dead-Letter Queue",
+    "📊 System Telemetry & Logs",
     "📖 Operations Manual"
 ]
 if user_role == "super_admin":
@@ -575,38 +589,17 @@ with tabs[1]:
                         with conn.cursor() as cur:
                             cur.execute("""
                                 INSERT INTO leads (
-                                    vertical,
-                                    source_platform,
-                                    platform_user_id,
-                                    username,
-                                    post_url,
-                                    raw_post_text,
-                                    carrier_name,
-                                    incident_identifier,
-                                    estimated_compensation,
-                                    regulatory_framework,
-                                    ai_reasoning,
-                                    claimant_name,
-                                    claimant_email,
-                                    claimant_phone,
-                                    status
+                                    vertical, source_platform, platform_user_id, username, post_url,
+                                    raw_post_text, carrier_name, incident_identifier, estimated_compensation,
+                                    regulatory_framework, ai_reasoning, claimant_name, claimant_email, claimant_phone, status
                                 ) VALUES (
                                     %s, 'direct_inbound', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review'
                                 ) RETURNING id::text;
                             """, (
-                                v_choice,
-                                client_email or client_phone or "direct_intake",
-                                client_full_name or "Direct Client",
-                                "https://disputeagent.internal/manual-intake",
-                                dispute_reasoning,
-                                target_carrier,
-                                incident_ref,
-                                est_payout,
-                                reg_citation,
-                                dispute_reasoning,
-                                client_full_name,
-                                client_email,
-                                client_phone
+                                v_choice, client_email or client_phone or "direct_intake",
+                                client_full_name or "Direct Client", "https://disputeagent.internal/manual-intake",
+                                dispute_reasoning, target_carrier, incident_ref, est_payout,
+                                reg_citation, dispute_reasoning, client_full_name, client_email, client_phone
                             ))
                             new_case_id = cur.fetchone()["id"]
                         conn.close()
@@ -636,8 +629,7 @@ with tabs[2]:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id::text AS id, sender_name, sender_email, subject, message, status, created_at 
-                FROM customer_inquiries 
-                ORDER BY created_at DESC LIMIT 50;
+                FROM customer_inquiries ORDER BY created_at DESC LIMIT 50;
             """)
             inquiries = cur.fetchall()
         conn.close()
@@ -747,8 +739,98 @@ with tabs[5]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 6: COMPREHENSIVE OPERATIONS & RBAC MANUAL ---
+# --- TAB 6: SYSTEM TELEMETRY & AUDIT LOGS (NEW) ---
 with tabs[6]:
+    st.subheader("📊 System Telemetry, Health & Audit Logs")
+    st.caption("Active connectivity diagnostics, service latencies, and transaction-level event telemetry.")
+
+    # Section A: Live Diagnostic Controls & Metrics
+    col_diag_btn, col_diag_time = st.columns([1.5, 2.5])
+    with col_diag_btn:
+        run_sweep = st.button("⚡ Run Instant Diagnostic Sweep", key="btn_run_diag")
+
+    if run_sweep or "diag_data" not in st.session_state:
+        try:
+            with st.spinner("Probing PostgreSQL, Gemini AI, and integration gateways..."):
+                diag_res = requests.get(f"{API_BASE}/api/v1/system/health-check", timeout=15)
+                if diag_res.status_code == 200:
+                    st.session_state.diag_data = diag_res.json()
+                else:
+                    st.session_state.diag_data = {"overall_status": "disrupted", "probes": {}}
+        except Exception as e:
+            st.session_state.diag_data = {"overall_status": "unreachable", "error": str(e), "probes": {}}
+
+    diag = st.session_state.get("diag_data", {})
+    overall_st = diag.get("overall_status", "unknown").upper()
+    
+    st.divider()
+    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+    status_icon = "🟢" if overall_st == "HEALTHY" else "🟡" if overall_st == "DEGRADED" else "🔴"
+    m_col1.metric("Core Gateway Status", f"{status_icon} {overall_st}")
+
+    db_probe = diag.get("probes", {}).get("database", {})
+    db_ms = db_probe.get("latency_ms", "N/A")
+    m_col2.metric("Database Latency", f"{db_ms} ms" if db_ms != "N/A" else "ERR")
+
+    ai_probe = diag.get("probes", {}).get("gemini_ai", {})
+    ai_ms = ai_probe.get("latency_ms", "N/A")
+    m_col3.metric("Gemini AI Latency", f"{ai_ms} ms" if ai_ms != "N/A" else "ERR")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM leads WHERE status = 'dispatch_failed';")
+            dlq_count = cur.fetchone()["c"]
+        conn.close()
+    except Exception:
+        dlq_count = "N/A"
+    m_col4.metric("Dead-Letter Queue Count", dlq_count)
+
+    # Detailed Probes Expansion
+    with st.expander("🔍 Detailed Integration Probes Breakdown", expanded=False):
+        st.json(diag.get("probes", {}))
+
+    # Section B: Database System Audit Logs
+    st.divider()
+    st.subheader("📜 Live Event Audit Log Stream")
+    
+    col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
+    with col_f1:
+        log_level_filter = st.selectbox("Log Level", ["ALL", "INFO", "WARN", "ERROR"], key="filter_log_level")
+    with col_f2:
+        log_limit = st.selectbox("Records", [25, 50, 100], index=1, key="filter_log_limit")
+    with col_f3:
+        st.write("") # Spacer
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            query = """
+                SELECT 
+                    created_at, service_name, event_category, log_level, message, 
+                    lead_id::text AS lead_id, metadata 
+                FROM system_audit_logs
+            """
+            params = []
+            if log_level_filter != "ALL":
+                query += " WHERE log_level = %s"
+                params.append(log_level_filter)
+            query += " ORDER BY created_at DESC LIMIT %s;"
+            params.append(log_limit)
+            cur.execute(query, tuple(params))
+            logs = cur.fetchall()
+        conn.close()
+
+        if logs:
+            df_logs = pd.DataFrame(logs)
+            st.dataframe(df_logs[["created_at", "service_name", "event_category", "log_level", "message", "lead_id"]])
+        else:
+            st.info("No audit logs matching query.")
+    except Exception as e:
+        st.error(f"Failed to fetch audit log telemetry: {e}")
+
+# --- TAB 7: OPERATIONS MANUAL ---
+with tabs[7]:
     st.header("📖 Dispute Agent Platform: Complete Operations Manual")
     st.caption("Standard Operating Procedures, Claim Lifecycle Guidelines, and Troubleshooting Reference.")
 
@@ -866,13 +948,13 @@ with tabs[6]:
           * Every operator can secure their account in the sidebar under **🔐 Two-Factor Security**.
           * Click **Enable 2FA Authenticator**, scan the QR code using Google Authenticator, 1Password, or Authy, enter the 6-digit verification code, and click **Activate 2FA**.
         * **Provisioning New Team Logins (Super Admin Only):**
-          * Super Admins have access to **Tab 7 (`User Administration`)** to create accounts for team members.
+          * Super Admins have access to **Tab 8 (`User Administration`)** to create accounts for team members.
           * Assign roles based on access needs: `claims_agent` (review only), `claims_manager` (review + DLQ actions), `auditor` (read-only), or `super_admin` (full system access).
         """)
 
-# --- TAB 7: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
-if user_role == "super_admin" and len(tabs) > 7:
-    with tabs[7]:
+# --- TAB 8: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
+if user_role == "super_admin" and len(tabs) > 8:
+    with tabs[8]:
         st.subheader("👥 User Management & Role Provisioning")
         col_new_user, col_user_list = st.columns([1, 1.4])
 
