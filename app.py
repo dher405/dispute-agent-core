@@ -660,10 +660,11 @@ with tabs[2]:
     except Exception as e:
         st.error(f"Error loading customer inquiries: {e}")
 
+# --- TAB 3: ACTIVE CLAIMS
 # --- TAB 3: ACTIVE CLAIMS (ENHANCED QUEUE & OUTREACH AUDIT) ---
 with tabs[3]:
     st.subheader("💼 Active Claims & Outreach Tracking Ledger")
-    st.caption("Track pipeline progress from queue and contact through formal dispatch and final settlement.")
+    st.caption("Track pipeline progress from queue and contact through formal dispatch and final settlement. Archive settled or unresponded claims to declutter this view.")
 
     status_filter = st.selectbox(
         "Filter by Lifecycle Stage",
@@ -692,8 +693,9 @@ with tabs[3]:
                     fee_collected,
                     created_at,
                     updated_at
-                FROM leads 
+                FROM leads
                 WHERE status IN ('approved', 'contacted', 'opted_in', 'dispatched', 'settled')
+                  AND status != 'archived'
             """
             params = []
             if status_filter != "All Active Stages":
@@ -709,7 +711,6 @@ with tabs[3]:
         if claims_list:
             df_claims = pd.DataFrame(claims_list)
 
-            # Compute channel summary display
             def compute_channel(row):
                 src = row.get("source_platform") or "unknown"
                 if src == "reddit":
@@ -722,7 +723,6 @@ with tabs[3]:
 
             df_claims["dispatch_channel"] = df_claims.apply(compute_channel, axis=1)
 
-            # Portfolio Summary Metrics
             m1, m2, m3, m4 = st.columns(4)
             tot_rec = df_claims["recovery_amount"].astype(float).sum()
             tot_fee = df_claims["fee_collected"].astype(float).sum()
@@ -734,14 +734,35 @@ with tabs[3]:
             m3.metric("Contacted (Pending Intake)", contacted_count)
             m4.metric("Platform Fees Recovered (25%)", f"${tot_fee:.2f}")
 
-            # Primary Table
             display_cols = ["id", "status", "vertical", "carrier_name", "dispatch_channel", "estimated_compensation", "recovery_amount", "updated_at"]
             st.dataframe(df_claims[display_cols], use_container_width=True)
 
-            # Detailed Claim & Outreach Inspection Card
+            # Bulk Archive Management Section
+            st.markdown("### 🗂️ Declutter & Bulk Archive Management")
+            active_claim_ids = [c["id"] for c in claims_list]
+            claims_to_archive = st.multiselect(
+                "Select Claims to Move to Archive (to remove clutter)",
+                options=active_claim_ids,
+                format_func=lambda x: next((f"{c['carrier_name'] or 'Provider'} ({c['vertical']}) - Status: {c['status']} - ID: {x[:8]}..." for c in claims_list if c["id"] == x), x),
+                key="multiselect_archive_claims"
+            )
+            col_arc_btn1, _ = st.columns([1, 4])
+            with col_arc_btn1:
+                if st.button("📦 Archive Selected Claims", type="primary", key="btn_bulk_archive"):
+                    if claims_to_archive:
+                        conn = get_db()
+                        with conn.cursor() as cur:
+                            for cid in claims_to_archive:
+                                cur.execute("UPDATE leads SET status = 'archived', updated_at = NOW() WHERE id::text = %s;", (cid,))
+                        conn.close()
+                        st.success(f"Successfully archived {len(claims_to_archive)} claim(s).")
+                        st.rerun()
+                    else:
+                        st.warning("Please select at least one claim to archive.")
+
             st.divider()
             st.subheader("🔍 Outreach & Transmission Inspector")
-            
+
             sel_claim_id = st.selectbox(
                 "Select Claim ID to Inspect Destination & Message Contents",
                 [c["id"] for c in claims_list],
@@ -766,13 +787,9 @@ with tabs[3]:
                 if src_url:
                     is_dummy = any(d in src_url.lower() for d in ["test_eval", "test_ua", "manual-intake", "direct-intake", "comments/$", "comments/"])
                     if is_dummy:
-                        st.markdown("🔗 **Where it is responding (Target Post):**")
                         source_plat = (selected_claim or {}).get("source_platform", "Direct").capitalize()
                         lead_uuid = (selected_claim or {}).get("id", "N/A")
                         st.markdown(f"**{source_plat} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
-                        plat_src = (selected_claim or {}).get("source_platform", "Direct")
-                        lead_uuid = (selected_claim or {}).get("id", "N/A")
-                        st.markdown(f"**{plat_src.capitalize()} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
                         target_url = (selected_claim or {}).get("post_url", "https://reddit.com")
                         carrier_title = (selected_claim or {}).get("carrier_name", "Target Discussion Thread")
                         st.markdown(f"Target Post URL: [{carrier_title}]({target_url})")
@@ -789,7 +806,7 @@ with tabs[3]:
 
             with col_detail_r:
                 st.markdown("#### Message Contents & Outreach Verbiage")
-                
+
                 if c_status == "approved":
                     st.warning("⏳ **Status: Queued for Outreach.** This message is scheduled for delivery to the recipient above.")
                 elif c_status == "contacted":
@@ -809,18 +826,105 @@ with tabs[3]:
                     disabled=True
                 )
 
-                if c_status == "approved":
-                    if st.button("🚀 Mark as Contacted (Confirm Dispatch)", key=f"mark_contacted_{sel_claim_id}"):
+                col_act1, col_act2 = st.columns(2)
+                with col_act1:
+                    if c_status == "approved":
+                        if st.button("🚀 Mark as Contacted (Confirm Dispatch)", key=f"mark_contacted_{sel_claim_id}"):
+                            conn = get_db()
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE leads SET status = 'contacted', updated_at = NOW() WHERE id::text = %s;", (sel_claim_id,))
+                            conn.close()
+                            st.success("Status updated to contacted.")
+                            st.rerun()
+                with col_act2:
+                    if st.button("📦 Move Claim to Archive", key=f"archive_claim_{sel_claim_id}"):
                         conn = get_db()
                         with conn.cursor() as cur:
-                            cur.execute("UPDATE leads SET status = 'contacted', updated_at = NOW() WHERE id::text = %s;", (sel_claim_id,))
+                            cur.execute("UPDATE leads SET status = 'archived', updated_at = NOW() WHERE id::text = %s;", (sel_claim_id,))
                         conn.close()
-                        st.success("Status updated to contacted.")
+                        st.success("Claim moved to archive successfully.")
                         st.rerun()
+
         else:
             st.info("No claims currently found matching this lifecycle stage.")
+
+        # --- ARCHIVED CLAIMS VAULT & RESTORATION SECTION ---
+        st.divider()
+        st.subheader("📦 Archived Claims Vault & Restoration")
+        st.caption("View, search, and restore settled, unresponded, or archived claims out of the active pipeline view.")
+
+        search_archived = st.text_input("🔍 Search Archived Claims (Carrier, Claimant, Vertical, or ID)", key="search_archived_input")
+
+        conn = get_db()
+        with conn.cursor() as cur:
+            arc_query = """
+                SELECT 
+                    id::text AS id,
+                    vertical,
+                    carrier_name,
+                    status,
+                    source_platform,
+                    username,
+                    claimant_name,
+                    claimant_email,
+                    claimant_phone,
+                    post_url,
+                    estimated_compensation,
+                    recovery_amount,
+                    fee_collected,
+                    updated_at
+                FROM leads
+                WHERE status = 'archived'
+                ORDER BY updated_at DESC;
+            """
+            cur.execute(arc_query)
+            archived_list = cur.fetchall()
+        conn.close()
+
+        if archived_list:
+            df_archived = pd.DataFrame(archived_list)
+
+            if search_archived:
+                term = search_archived.lower()
+                mask = df_archived.apply(lambda row: term in str(row.get('carrier_name', '')).lower() or 
+                                                      term in str(row.get('claimant_name', '')).lower() or 
+                                                      term in str(row.get('claimant_email', '')).lower() or 
+                                                      term in str(row.get('vertical', '')).lower() or 
+                                                      term in str(row.get('id', '')).lower(), axis=1)
+                df_archived = df_archived[mask]
+
+            if not df_archived.empty:
+                st.dataframe(df_archived[["id", "vertical", "carrier_name", "claimant_name", "estimated_compensation", "recovery_amount", "updated_at"]], use_container_width=True)
+
+                archived_ids = df_archived["id"].tolist()
+                claims_to_restore = st.multiselect(
+                    "Select Archived Claims to Restore Back to Active Queue",
+                    options=archived_ids,
+                    format_func=lambda x: next((f"{c['carrier_name'] or 'Provider'} ({c['vertical']}) - Claimant: {c['claimant_name'] or 'N/A'} - ID: {x[:8]}..." for c in archived_list if c["id"] == x), x),
+                    key="multiselect_restore_claims"
+                )
+
+                col_res_btn1, _ = st.columns([1, 4])
+                with col_res_btn1:
+                    if st.button("🔄 Restore Selected to Active", type="primary", key="btn_bulk_restore"):
+                        if claims_to_restore:
+                            conn = get_db()
+                            with conn.cursor() as cur:
+                                for cid in claims_to_restore:
+                                    cur.execute("UPDATE leads SET status = 'approved', updated_at = NOW() WHERE id::text = %s;", (cid,))
+                            conn.close()
+                            st.success(f"Successfully restored {len(claims_to_restore)} claim(s) to active queue.")
+                            st.rerun()
+                        else:
+                            st.warning("Please select at least one claim to restore.")
+            else:
+                st.info("No archived claims match your search criteria.")
+        else:
+            st.info("The archive vault is currently empty.")
+
     except Exception as e:
         st.error(f"Error loading active claims ledger: {e}")
+
 
 # --- TAB 4: WEBHOOK AUDIT ---
 with tabs[4]:
