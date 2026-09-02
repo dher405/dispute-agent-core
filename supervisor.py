@@ -1,17 +1,48 @@
+import sys
 import time
+import subprocess
 import logging
-from worker import run_ingestion_cycle
-from carrier_retry_worker import run_retry_cycle
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [SUPERVISOR] - %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Supervisor")
 
-if __name__ == "__main__":
-    logger.info("Starting unified background worker daemon...")
+WORKERS = [
+    {"name": "Reddit Ingestion", "cmd": [sys.executable, "worker.py"]},
+    {"name": "Bluesky Ingestion", "cmd": [sys.executable, "worker_bluesky.py"]}
+]
+
+def run_all_once():
+    logger.info("Running single pass across all platform ingestion daemons...")
+    for w in WORKERS:
+        cmd = w["cmd"] + ["--once"]
+        logger.info(f"Triggering {w['name']} once...")
+        try:
+            subprocess.run(cmd, check=True)
+        except Exception as e:
+            logger.error(f"Execution error on {w['name']}: {e}")
+
+def monitor_daemons():
+    processes = {}
+    for w in WORKERS:
+        logger.info(f"Launching long-running worker: {w['name']}")
+        processes[w["name"]] = subprocess.Popen(w["cmd"])
+
     while True:
         try:
-            run_retry_cycle()
-            run_ingestion_cycle()
-        except Exception as e:
-            logger.error(f"Supervisor loop error: {e}")
-        time.sleep(45)
+            for name, proc in list(processes.items()):
+                if proc.poll() is not None:
+                    logger.warning(f"Worker {name} exited with code {proc.returncode}. Restarting...")
+                    w_config = next(item for item in WORKERS if item["name"] == name)
+                    processes[name] = subprocess.Popen(w_config["cmd"])
+            time.sleep(10)
+        except KeyboardInterrupt:
+            logger.info("Terminating all supervised child processes...")
+            for proc in processes.values():
+                proc.terminate()
+            break
+
+if __name__ == "__main__":
+    if "--once" in sys.argv:
+        run_all_once()
+    else:
+        monitor_daemons()
