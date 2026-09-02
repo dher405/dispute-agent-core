@@ -767,14 +767,14 @@ with tabs[3]:
                     is_dummy = any(d in src_url.lower() for d in ["test_eval", "test_ua", "manual-intake", "direct-intake", "comments/$", "comments/"])
                     if is_dummy:
                         st.markdown("🔗 **Where it is responding (Target Post):**")
-                        source_plat = (selected_lead or {}).get("source_platform", "Direct").capitalize()
-                        lead_uuid = (selected_lead or {}).get("id", "N/A")
+                        source_plat = (selected_claim or {}).get("source_platform", "Direct").capitalize()
+                        lead_uuid = (selected_claim or {}).get("id", "N/A")
                         st.markdown(f"**{source_plat} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
-                        plat_src = (selected_lead or {}).get("source_platform", "Direct")
-                        lead_uuid = (selected_lead or {}).get("id", "N/A")
+                        plat_src = (selected_claim or {}).get("source_platform", "Direct")
+                        lead_uuid = (selected_claim or {}).get("id", "N/A")
                         st.markdown(f"**{plat_src.capitalize()} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
-                        target_url = (selected_lead or {}).get("post_url", "https://reddit.com")
-                        carrier_title = (selected_lead or {}).get("carrier_name", "Target Discussion Thread")
+                        target_url = (selected_claim or {}).get("post_url", "https://reddit.com")
+                        carrier_title = (selected_claim or {}).get("carrier_name", "Target Discussion Thread")
                         st.markdown(f"Target Post URL: [{carrier_title}]({target_url})")
                     else:
                         full_url = src_url if src_url.startswith("http") else f"https://{src_url}"
