@@ -338,7 +338,7 @@ def sweep_reddit_vendor():
     )
 
 def sweep_bluesky_vendor():
-    """Sweeps Bluesky AT Protocol firehose search endpoint and logs telemetry."""
+    """Sweeps Bluesky AT Protocol firehose search endpoint with standard headers and logs telemetry."""
     endpoint = "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts"
     log_system_event(
         "bluesky_ingestion",
@@ -347,10 +347,15 @@ def sweep_bluesky_vendor():
         f"Checking Bluesky Public Feed across {len(BLUESKY_QUERIES)} disruption filters."
     )
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+
     staged_count = 0
     for query in BLUESKY_QUERIES:
         try:
-            res = requests.get(endpoint, params={"q": query, "limit": 10, "sort": "latest"}, timeout=10)
+            res = requests.get(endpoint, params={"q": query, "limit": 10, "sort": "latest"}, headers=headers, timeout=10)
             if res.status_code == 200:
                 posts = res.json().get("posts", [])
                 for p in posts:
