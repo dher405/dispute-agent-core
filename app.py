@@ -394,12 +394,22 @@ with tabs[0]:
 
             with col_b:
                 claim_auth_link = f"https://dispute-admin.onrender.com/?claim_id={selected_lead_id}"
-                default_copy = selected_lead.get("outreach_copy") or ""
+                raw_copy = selected_lead.get("outreach_copy") or ""
                 
-                if claim_auth_link not in default_copy:
-                    full_outreach_proposal = f"{default_copy} Authorize representation and claim your restitution here: {claim_auth_link}".strip()
+                # Defensive check: if copy starts like a vendor letter, reconstruct consumer copy
+                if any(p in raw_copy.lower() for p in ["dear ", "customer care", "i am writing to"]):
+                    c_name = selected_lead.get("carrier_name") or "the provider"
+                    c_amt = float(selected_lead.get("estimated_compensation") or 0.0)
+                    c_law = selected_lead.get("regulatory_framework") or "statutory protections"
+                    full_outreach_proposal = (
+                        f"Under {c_law}, you are entitled to claim up to ${c_amt:.2f} from {c_name} for your disruption. "
+                        f"Authorize our legal desk to serve your formal demand letter here: {claim_auth_link}"
+                    )
                 else:
-                    full_outreach_proposal = default_copy
+                    if claim_auth_link not in raw_copy:
+                        full_outreach_proposal = f"{raw_copy} Authorize claim recovery here: {claim_auth_link}".strip()
+                    else:
+                        full_outreach_proposal = raw_copy
 
                 outreach_text = st.text_area(
                     "Consumer Outreach Message (Sends to social platform / claimant)",
