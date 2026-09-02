@@ -25,7 +25,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 app = FastAPI(
     title="Dispute Agent Core Engine",
     description="Autonomous multi-vertical statutory dispute recovery platform.",
-    version="2.6.0"
+    version="2.7.0"
 )
 
 app.add_middleware(
@@ -148,14 +148,22 @@ def trigger_carrier_demand_pipeline(lead_id: str):
 def evaluate_multi_vertical_signal(text: str) -> Dict[str, Any]:
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = f"""
-Analyze the consumer post for statutory compensation, bill credits, or regulatory refund eligibility.
+You are the Lead Consumer Recovery Advocate for Dispute Agent.
+Analyze the following public complaint to determine if the consumer is owed statutory compensation, bill credits, or refunds.
+
+Core Rules for outreach_copy:
+1. THIS MESSAGE IS WRITTEN TO THE AFFECTED CONSUMER / PASSENGER, NOT TO THE AIRLINE OR VENDOR.
+2. NEVER start with 'Dear [Carrier] Customer Care' or 'I am writing to claim'.
+3. Address the consumer directly ('You may be entitled to...', 'Because [Carrier] delayed flight [Flight]...').
+4. Clearly state what statutory regulation protects them and the exact estimated dollar amount owed to them.
+5. Keep outreach_copy under 220 characters so the authorization tracking link can be appended cleanly.
 
 Verticals & Default Statutory Baselines:
-1. 'flight_disruption': UK261/EU261 (€250 to €600 / $300-$650 USD), US DOT 14 CFR Part 260 (full prompt refund for cancellation or >3hr domestic delay, baseline standard: $650.00 if ticket price unspecified).
-2. 'isp_outage': Regional utility/telecom tariffs and state SLA mandates (baseline standard: $50.00-$150.00 for sustained outages >4-24hrs).
-3. 'security_deposit': Statutory landlord penalties (2x to 3x deposit) for failure to return/itemize within statutory deadlines (e.g., 30-60 days).
-4. 'class_action': Active settlement funds or FTC restitution pools.
-5. 'other': Ineligible or non-statutory.
+- 'flight_disruption': UK261/EU261 (£520 / €600 / ~$650 USD for delays >3hrs from UK/EU or on EU/UK carriers), US DOT 14 CFR Part 260 (mandatory cash refunds for cancellations or significant delays >3hrs domestic, >6hrs international).
+- 'isp_outage': Regional utility/telecom tariffs and state SLA mandates (baseline standard: $50.00-$150.00 for sustained outages >4-24hrs).
+- 'security_deposit': Statutory landlord penalties (2x to 3x deposit) for failure to return/itemize within statutory deadlines (e.g., 30-60 days).
+- 'class_action': Active court-approved restitution funds or FTC restitution pools.
+- 'other': Ineligible or non-statutory.
 
 Post Text:
 "{text}"
@@ -167,9 +175,9 @@ Return strictly valid JSON matching this exact structure:
     "carrier_name": "Identified Carrier/ISP/Entity name or Unknown",
     "incident_identifier": "Flight number, Ticket ID, Account Ref, or null",
     "estimated_compensation": 650.00,
-    "regulatory_framework": "e.g., US DOT 14 CFR Part 260 | UK261/EU261 | State PUC Tariff Rule 21 | C.R.S. § 38-12-103",
-    "ai_reasoning": "Clear statutory breakdown of why this compensation is legally owed.",
-    "outreach_copy": "Direct second-person message TO THE CONSUMER (under 240 chars). Clearly state that the OPPOSING ENTITY violated statutory rules and specify the exact dollar amount the consumer can recover."
+    "regulatory_framework": "e.g., UK261 / EU261 | US DOT 14 CFR Part 260 | State PUC Tariff Rule 21 | C.R.S. § 38-12-103",
+    "ai_reasoning": "Clear statutory breakdown explaining why the respondent owes liquidated restitution.",
+    "outreach_copy": "Consumer-facing outreach text under 220 characters informing them of the violation and statutory compensation amount."
 }}
 """
     try:
