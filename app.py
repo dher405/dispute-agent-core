@@ -318,10 +318,10 @@ with st.sidebar:
         try:
             conn = get_db()
             with conn.cursor() as cur:
-                cur.execute("SELECT key, value FROM system_settings WHERE category IN ('reddit_api', 'bluesky_api', 'smtp_gateway') ORDER BY key;")
+                cur.execute("SELECT key, value FROM system_settings WHERE category IN ('reddit_api', 'bluesky_api', 'smtp_gateway', 'twilio', 'stripe') ORDER BY key;")
                 existing_settings = dict(cur.fetchall())
             conn.close()
-            tab_r, tab_b, tab_s = st.tabs(['🤖 Reddit API (OAuth)', '🦋 Bluesky AT Protocol', '⚖️ SMTP / Carrier Legal'])
+            tab_r, tab_b, tab_s, tab_tw, tab_pay = st.tabs(['🤖 Reddit API (OAuth)', '🦋 Bluesky AT Protocol', '⚖️ SMTP / Carrier Legal', '📱 Twilio SMS', '💳 Stripe Payouts'])
             with tab_r:
                 st.markdown('#### Reddit OAuth Script Application Configuration')
                 st.caption('Required for automated thread replies and direct messages under the Responsible Builder Policy.')
@@ -414,6 +414,58 @@ with st.sidebar:
                             """, (k, v, cat, desc))
                     conn.close()
                     st.success('SMTP gateway settings saved to system_settings.')
+                    st.rerun()
+            with tab_tw:
+                st.markdown('#### Twilio SMS Gateway')
+                st.caption('Configure Twilio credentials used for outbound SMS notifications to claimants and carriers.')
+                col_tw1, col_tw2 = st.columns(2)
+                with col_tw1:
+                    tw_sid = st.text_input('Twilio Account SID', value=existing_settings.get('TWILIO_ACCOUNT_SID', ''), key='cfg_twilio_sid')
+                    tw_token = st.text_input('Twilio Auth Token', value=existing_settings.get('TWILIO_AUTH_TOKEN', ''), type='password', key='cfg_twilio_token')
+                with col_tw2:
+                    tw_phone = st.text_input('Twilio Phone Number', value=existing_settings.get('TWILIO_PHONE_NUMBER', ''), key='cfg_twilio_phone')
+                if st.button('💾 Save Twilio Credentials', key='btn_save_twilio_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        records = [
+                            ('TWILIO_ACCOUNT_SID', tw_sid, 'twilio', 'Twilio account identifier for SMS dispatch'),
+                            ('TWILIO_AUTH_TOKEN', tw_token, 'twilio', 'Twilio API authentication token'),
+                            ('TWILIO_PHONE_NUMBER', tw_phone, 'twilio', 'Outbound Twilio SMS sender number')
+                        ]
+                        for k, v, cat, desc in records:
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, description, updated_at)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE
+                                SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                            """, (k, v, cat, desc))
+                    conn.close()
+                    st.success('Twilio SMS credentials saved to system_settings.')
+                    st.rerun()
+            with tab_pay:
+                st.markdown('#### Stripe Payouts & Settlement')
+                st.caption('Configure Stripe keys used for processing contingency-fee settlement payouts.')
+                col_pay1, col_pay2 = st.columns(2)
+                with col_pay1:
+                    pay_secret_key = st.text_input('Stripe Secret Key', value=existing_settings.get('STRIPE_SECRET_KEY', ''), type='password', key='cfg_stripe_secret')
+                with col_pay2:
+                    pay_publishable_key = st.text_input('Stripe Publishable Key', value=existing_settings.get('STRIPE_PUBLISHABLE_KEY', ''), key='cfg_stripe_public')
+                if st.button('💾 Save Stripe Credentials', key='btn_save_stripe_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        records = [
+                            ('STRIPE_SECRET_KEY', pay_secret_key, 'stripe', 'Stripe secret API key for settlement processing'),
+                            ('STRIPE_PUBLISHABLE_KEY', pay_publishable_key, 'stripe', 'Stripe publishable key for client-side checkout')
+                        ]
+                        for k, v, cat, desc in records:
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, description, updated_at)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE
+                                SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                            """, (k, v, cat, desc))
+                    conn.close()
+                    st.success('Stripe settlement credentials saved to system_settings.')
                     st.rerun()
         except Exception as e:
             st.error(f'Error loading vendor configuration vault: {e}')
