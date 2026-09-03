@@ -373,19 +373,19 @@ with st.sidebar:
         st.session_state.user_info = None
         st.rerun()
 
-tab_titles = [
-    "📥 Ingestion Queue", 
-    "✍️ Direct Manual Intake", 
-    "💬 Customer Inquiries", 
-    "💼 Active Claims", 
-    "📡 Webhook Audit", 
-    "⚠️ Dead-Letter Queue",
-    "📊 System Telemetry & Logs",
-    "📖 Operations Manual"
-]
-if user_role == "super_admin":
-    tab_titles.append("👥 User Administration")
-
+    tab_titles = [
+        "📥 Ingestion Queue",
+        "📝 Direct Intake",
+        "💬 Inquiries",
+        "💼 Active Claims",
+        "👤 Customer Interactions",
+        "🏢 Vendor Communications",
+        "📥 Webhook Audit",
+        "⚠️ Dead-Letter Queue",
+        "📊 System Telemetry",
+        "📖 Operations Manual",
+        "⚙️ Super Admin"
+    ]
 tabs = st.tabs(tab_titles)
 
 # --- TAB 0: INGESTION QUEUE ---
@@ -660,7 +660,7 @@ with tabs[2]:
     except Exception as e:
         st.error(f"Error loading customer inquiries: {e}")
 
-# --- TAB 3: ACTIVE CLAIMS (ENHANCED QUEUE, ARCHIVE & OUTREACH AUDIT) ---
+# --- TAB 3: ACTIVE CLAIMS (ENHANCED QUEUE & ARCHIVE) ---
 with tabs[3]:
     st.subheader("💼 Active Claims & Outreach Tracking Ledger")
     st.caption("Track pipeline progress from queue and contact through formal dispatch and final settlement. Archive settled or unresponded claims to declutter this view.")
@@ -676,22 +676,10 @@ with tabs[3]:
         with conn.cursor() as cur:
             query = """
                 SELECT 
-                    id::text AS id,
-                    vertical,
-                    carrier_name,
-                    status,
-                    source_platform,
-                    username,
-                    claimant_name,
-                    claimant_email,
-                    claimant_phone,
-                    post_url,
-                    outreach_copy,
-                    estimated_compensation,
-                    recovery_amount,
-                    fee_collected,
-                    created_at,
-                    updated_at
+                    id::text AS id, vertical, carrier_name, status, source_platform,
+                    username, claimant_name, claimant_email, claimant_phone, post_url,
+                    outreach_copy, estimated_compensation, recovery_amount, fee_collected,
+                    created_at, updated_at
                 FROM leads
                 WHERE status IN ('approved', 'contacted', 'opted_in', 'dispatched', 'settled')
                   AND status != 'archived'
@@ -736,411 +724,369 @@ with tabs[3]:
             display_cols = ["id", "status", "vertical", "carrier_name", "dispatch_channel", "estimated_compensation", "recovery_amount", "updated_at"]
             st.dataframe(df_claims[display_cols], use_container_width=True)
 
-            # Bulk Archive Management Section
             st.markdown("### 🗂️ Declutter & Bulk Archive Management")
             active_claim_ids = [c["id"] for c in claims_list]
             claims_to_archive = st.multiselect(
-                "Select Claims to Move to Archive (to remove clutter)",
+                "Select Claims to Move to Archive",
                 options=active_claim_ids,
                 format_func=lambda x: next((f"{c['carrier_name'] or 'Provider'} ({c['vertical']}) - Status: {c['status']} - ID: {x[:8]}..." for c in claims_list if c["id"] == x), x),
                 key="multiselect_archive_claims"
             )
-            col_arc_btn1, _ = st.columns([1, 4])
-            with col_arc_btn1:
-                if st.button("📦 Archive Selected Claims", type="primary", key="btn_bulk_archive"):
-                    if claims_to_archive:
-                        conn = get_db()
-                        with conn.cursor() as cur:
-                            for cid in claims_to_archive:
-                                cur.execute("UPDATE leads SET status = 'archived', updated_at = NOW() WHERE id::text = %s;", (cid,))
-                        conn.close()
-                        st.success(f"Successfully archived {len(claims_to_archive)} claim(s).")
-                        st.rerun()
-                    else:
-                        st.warning("Please select at least one claim to archive.")
-
-            st.divider()
-            st.subheader("🔍 Outreach & Transmission Inspector")
-
-            sel_claim_id = st.selectbox(
-                "Select Claim ID to Inspect Destination & Message Contents",
-                [c["id"] for c in claims_list],
-                key="sel_active_claim_inspect"
-            )
-            selected_claim = next(c for c in claims_list if c["id"] == sel_claim_id)
-
-            c_status = selected_claim.get("status")
-            claim_auth_url = f"https://dispute-admin.onrender.com/?claim_id={sel_claim_id}"
-            src_url = selected_claim.get("post_url")
-            platform = selected_claim.get("source_platform") or "Direct"
-
-            col_detail_l, col_detail_r = st.columns(2)
-
-            with col_detail_l:
-                st.markdown("#### Destination & Channel Verification")
-                st.markdown(f"**Dispute Vertical:** `{selected_claim.get('vertical')}`")
-                st.markdown(f"**Target Respondent:** `{selected_claim.get('carrier_name') or 'N/A'}`")
-                st.markdown(f"**Current Status:** `{c_status.upper()}`")
-                st.markdown(f"**Source Platform:** `{platform}`")
-
-                if src_url:
-                    is_dummy = any(d in src_url.lower() for d in ["test_eval", "test_ua", "manual-intake", "direct-intake", "comments/$", "comments/"])
-                    if is_dummy:
-                        source_plat = (selected_claim or {}).get("source_platform", "Direct").capitalize()
-                        lead_uuid = (selected_claim or {}).get("id", "N/A")
-                        st.markdown(f"**{source_plat} Ingestion Lead** — Canonical Record ID: `{lead_uuid}`")
-                        target_url = (selected_claim or {}).get("post_url", "https://reddit.com")
-                        carrier_title = (selected_claim or {}).get("carrier_name", "Target Discussion Thread")
-                        st.markdown(f"Target Post URL: [{carrier_title}]({target_url})")
-                    else:
-                        full_url = src_url if src_url.startswith("http") else f"https://{src_url}"
-                        st.markdown(f"🔗 **Where it is responding (Target Post):** [Open Live Discussion Thread]({full_url})")
-                        st.caption(f"`{full_url}`")
+            if st.button("📦 Archive Selected Claims", type="primary", key="btn_bulk_archive"):
+                if claims_to_archive:
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        for cid in claims_to_archive:
+                            cur.execute("UPDATE leads SET status = 'archived', updated_at = NOW() WHERE id::text = %s;", (cid,))
+                    conn.close()
+                    st.success(f"Successfully archived {len(claims_to_archive)} claim(s).")
+                    st.rerun()
                 else:
-                    target_dest = selected_claim.get("claimant_email") or selected_claim.get("claimant_phone") or "Direct Portal Submission"
-                    st.markdown(f"📧 **Direct Recipient:** `{target_dest}`")
-
-                st.markdown(f"🛡️ **Unique Authorization URL:** [Open Claim Portal Card]({claim_auth_url})")
-                st.caption(f"`{claim_auth_url}`")
-
-            with col_detail_r:
-                st.markdown("#### Message Contents & Outreach Verbiage")
-
-                data_status = c_status
-                if data_status == "approved":
-                    st.warning("⏳ **Status: Queued for Outreach.** This message is scheduled for delivery to the recipient above.")
-                elif data_status == "contacted":
-                    st.info("📨 **Status: Contacted.** Message delivered to target discussion/inbox. Awaiting claimant e-signature.")
-                elif data_status in ("opted_in", "dispatched"):
-                    st.success("✅ **Status: Authorized & Dispatched.** Client completed intake. Formal statutory demand served.")
-                elif data_status == "settled":
-                    rec = float(selected_claim.get("recovery_amount") or 0.0)
-                    fee = float(selected_claim.get("fee_collected") or (rec * 0.25))
-                    st.success(f"🎉 **Status: Settled.** Recovered: **${rec:.2f}** | Platform 25% Contingency Fee: **${fee:.2f}**")
-
-                msg_content = selected_claim.get("outreach_copy") or "No custom outreach copy recorded. Standard statutory representation template applied."
-                st.text_area(
-                    "Outreach Content (Exact verbiage sent or queued for delivery)",
-                    value=msg_content,
-                    height=140,
-                    disabled=True
-                )
-
-                col_act1, col_act2 = st.columns(2)
-                with col_act1:
-                    if data_status == "approved":
-                        if st.button("🚀 Mark as Contacted (Confirm Dispatch)", key=f"mark_contacted_{sel_claim_id}"):
-                            conn = get_db()
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE leads SET status = 'contacted', updated_at = NOW() WHERE id::text = %s;", (sel_claim_id,))
-                            conn.close()
-                            st.success("Status updated to contacted.")
-                            st.rerun()
-                with col_act2:
-                    if st.button("📦 Move Claim to Archive", key=f"archive_claim_{sel_claim_id}"):
-                        conn = get_db()
-                        with conn.cursor() as cur:
-                            cur.execute("UPDATE leads SET status = 'archived', updated_at = NOW() WHERE id::text = %s;", (sel_claim_id,))
-                        conn.close()
-                        st.success("Claim moved to archive successfully.")
-                        st.rerun()
-
+                    st.warning("Please select at least one claim to archive.")
         else:
-            st.info("No claims currently found matching this lifecycle stage.")
+            st.info("No active claims found matching this lifecycle stage.")
 
-        # --- ARCHIVED CLAIMS VAULT & RESTORATION SECTION ---
         st.divider()
         st.subheader("📦 Archived Claims Vault & Restoration")
-        st.caption("View, search, and restore settled, unresponded, or archived claims out of the active pipeline view.")
-
-        search_archived = st.text_input("🔍 Search Archived Claims (Carrier, Claimant, Vertical, or ID)", key="search_archived_input")
-
         conn = get_db()
         with conn.cursor() as cur:
-            arc_query = """
-                SELECT 
-                    id::text AS id,
-                    vertical,
-                    carrier_name,
-                    status,
-                    source_platform,
-                    username,
-                    claimant_name,
-                    claimant_email,
-                    claimant_phone,
-                    post_url,
-                    estimated_compensation,
-                    recovery_amount,
-                    fee_collected,
-                    updated_at
-                FROM leads
-                WHERE status = 'archived'
-                ORDER BY updated_at DESC;
-            """
-            cur.execute(arc_query)
+            cur.execute("SELECT id::text AS id, vertical, carrier_name, status, claimant_name, claimant_email, estimated_compensation, recovery_amount, updated_at FROM leads WHERE status = 'archived' ORDER BY updated_at DESC;")
             archived_list = cur.fetchall()
         conn.close()
 
         if archived_list:
             df_archived = pd.DataFrame(archived_list)
+            st.dataframe(df_archived[["id", "vertical", "carrier_name", "claimant_name", "estimated_compensation", "recovery_amount", "updated_at"]], use_container_width=True)
 
-            if search_archived:
-                term = search_archived.lower()
-                mask = df_archived.apply(lambda row: term in str(row.get('carrier_name', '')).lower() or 
-                                                      term in str(row.get('claimant_name', '')).lower() or 
-                                                      term in str(row.get('claimant_email', '')).lower() or 
-                                                      term in str(row.get('vertical', '')).lower() or 
-                                                      term in str(row.get('id', '')).lower(), axis=1)
-                df_archived = df_archived[mask]
-
-            if not df_archived.empty:
-                st.dataframe(df_archived[["id", "vertical", "carrier_name", "claimant_name", "estimated_compensation", "recovery_amount", "updated_at"]], use_container_width=True)
-
-                archived_ids = df_archived["id"].tolist()
-                claims_to_restore = st.multiselect(
-                    "Select Archived Claims to Restore Back to Active Queue",
-                    options=archived_ids,
-                    format_func=lambda x: next((f"{c['carrier_name'] or 'Provider'} ({c['vertical']}) - Claimant: {c['claimant_name'] or 'N/A'} - ID: {x[:8]}..." for c in archived_list if c["id"] == x), x),
-                    key="multiselect_restore_claims"
-                )
-
-                col_res_btn1, _ = st.columns([1, 4])
-                with col_res_btn1:
-                    if st.button("🔄 Restore Selected to Active", type="primary", key="btn_bulk_restore"):
-                        if claims_to_restore:
-                            conn = get_db()
-                            with conn.cursor() as cur:
-                                for cid in claims_to_restore:
-                                    cur.execute("UPDATE leads SET status = 'approved', updated_at = NOW() WHERE id::text = %s;", (cid,))
-                            conn.close()
-                            st.success(f"Successfully restored {len(claims_to_restore)} claim(s) to active queue.")
-                            st.rerun()
-                        else:
-                            st.warning("Please select at least one claim to restore.")
-            else:
-                st.info("No archived claims match your search criteria.")
+            archived_ids = df_archived["id"].tolist()
+            claims_to_restore = st.multiselect("Select Archived Claims to Restore Back to Active Queue", options=archived_ids, key="multiselect_restore_claims")
+            if st.button("🔄 Restore Selected to Active", type="primary", key="btn_bulk_restore"):
+                if claims_to_restore:
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        for cid in claims_to_restore:
+                            cur.execute("UPDATE leads SET status = 'approved', updated_at = NOW() WHERE id::text = %s;", (cid,))
+                    conn.close()
+                    st.success(f"Restored {len(claims_to_restore)} claim(s) to active queue.")
+                    st.rerun()
         else:
             st.info("The archive vault is currently empty.")
-
     except Exception as e:
         st.error(f"Error loading active claims ledger: {e}")
 
-
-# --- TAB 4: WEBHOOK AUDIT ---
+# --- TAB 4: CUSTOMER INTERACTIONS BY CLAIM ID ---
 with tabs[4]:
-    st.subheader("Inbound Carrier Telemetry Events")
+    st.subheader("👤 Customer Correspondence & Verification Audit")
+    st.caption("Inspect passenger onboarding data, signed authorizations, PNR references, and consumer outreach by Claim ID.")
+
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id::text, carrier_name, vertical, event_type, settlement_amount, parsed_notes, created_at 
-                FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 50;
-            """)
+            cur.execute("SELECT id::text AS id, carrier_name, vertical, claimant_name, claimant_email, status FROM leads ORDER BY updated_at DESC LIMIT 200;")
+            leads_for_cust = cur.fetchall()
+        conn.close()
+
+        if leads_for_cust:
+            sel_lead_id_cust = st.selectbox(
+                "Select Claim ID to Audit Customer Communications",
+                options=[l["id"] for l in leads_for_cust],
+                format_func=lambda x: next((f"Claim ID: {x[:8]}... | {l['carrier_name'] or 'N/A'} | Customer: {l['claimant_name'] or 'Unclaimed'} ({l['status']})" for l in leads_for_cust if l["id"] == x), x),
+                key="sel_claim_cust_audit"
+            )
+
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM leads WHERE id::text = %s;", (sel_lead_id_cust,))
+                c_lead = cur.fetchone()
+            conn.close()
+
+            if c_lead:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("#### 📋 Passenger Verification Card")
+                    st.markdown(f"**Claimant Full Name:** `{c_lead.get('claimant_name') or 'Pending Intake'}`")
+                    st.markdown(f"**Email Address:** `{c_lead.get('claimant_email') or 'N/A'}`")
+                    st.markdown(f"**Phone Number:** `{c_lead.get('claimant_phone') or 'N/A'}`")
+                    st.markdown(f"**Physical Address:** `{c_lead.get('claimant_address') or 'N/A'}`")
+                    st.markdown(f"**PNR / Booking Reference:** `{c_lead.get('pnr') or 'N/A'}`")
+                    st.markdown(f"**Incident Date:** `{c_lead.get('incident_date') or 'N/A'}`")
+                with c2:
+                    st.markdown("#### ✍️ Legal Authorization & Terms")
+                    st.markdown(f"**Digital Signature:** `{c_lead.get('digital_signature') or 'Not Signed Yet'}`")
+                    st.markdown(f"**Authorization Status:** `{str(c_lead.get('status')).upper()}`")
+                    st.markdown(f"**Contingency Terms:** `Flat 25% Deducted Upon Recovery ($0 Upfront)`")
+                    portal_url = f"https://dispute-admin.onrender.com/?claim_id={sel_lead_id_cust}"
+                    st.markdown(f"**Client Portal URL:** [{portal_url}]({portal_url})")
+
+                st.divider()
+                st.markdown("#### 💬 Consumer Outreach Notice & Channel Delivery")
+                st.markdown(f"**Source Ingestion Platform:** `{c_lead.get('source_platform') or 'Direct Inbound'}`")
+                st.markdown(f"**Target User Handle:** `u/{c_lead.get('username') or 'N/A'}`")
+                st.markdown(f"**Target Discussion URL:** [{c_lead.get('post_url') or 'Portal'}]({c_lead.get('post_url') or '#'})")
+                st.text_area("Outreach Message Delivered to Passenger", value=c_lead.get('outreach_copy') or "Standard notification.", height=110, disabled=True)
+        else:
+            st.info("No claims found in database.")
+    except Exception as e:
+        st.error(f"Error loading customer interactions: {e}")
+
+# --- TAB 5: VENDOR COMMUNICATIONS & DEMAND LETTERS ---
+with tabs[5]:
+    st.subheader("🏢 Vendor Demand Letters & Carrier Interaction Ledger")
+    st.caption("Audit where and how statutory legal demands were served to carriers and inspect inbound vendor responses.")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text AS id, carrier_name, vertical, claimant_name, status FROM leads WHERE status IN ('dispatched', 'settled', 'opted_in', 'approved') ORDER BY updated_at DESC LIMIT 200;")
+            leads_for_vendor = cur.fetchall()
+        conn.close()
+
+        if leads_for_vendor:
+            sel_lead_id_ven = st.selectbox(
+                "Select Claim ID to Audit Vendor Communications",
+                options=[l["id"] for l in leads_for_vendor],
+                format_func=lambda x: next((f"Claim ID: {x[:8]}... | Target: {l['carrier_name'] or 'Carrier'} ({l['status']})" for l in leads_for_vendor if l["id"] == x), x),
+                key="sel_claim_vendor_audit"
+            )
+
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM leads WHERE id::text = %s;", (sel_lead_id_ven,))
+                v_lead = cur.fetchone()
+
+                cur.execute("SELECT * FROM carrier_inbound_events WHERE lead_id::text = %s ORDER BY created_at DESC;", (sel_lead_id_ven,))
+                vendor_events = cur.fetchall()
+            conn.close()
+
+            if v_lead:
+                v1, v2 = st.columns(2)
+                with v1:
+                    st.markdown("#### 🎯 Target Carrier & Service Details")
+                    st.markdown(f"**Respondent Carrier / Vendor:** `{v_lead.get('carrier_name') or 'N/A'}`")
+                    st.markdown(f"**Vertical & Statute:** `{v_lead.get('vertical')} ({v_lead.get('regulatory_framework') or 'US DOT 14 CFR Part 260'})`")
+                    st.markdown(f"**Delivery Protocol:** `Formal PDF Legal Demand served via SMTP to Legal Intake Desk`")
+                    st.markdown(f"**Dispatch Lifecycle State:** `{str(v_lead.get('status')).upper()}`")
+                with v2:
+                    st.markdown("#### 💰 Financial Ledger & Fee Tracking")
+                    r_amt = float(v_lead.get('recovery_amount') or 0.0)
+                    e_amt = float(v_lead.get('estimated_compensation') or 0.0)
+                    f_amt = float(v_lead.get('fee_collected') or (r_amt * 0.25))
+                    st.markdown(f"**Statutory Demand Amount:** `${e_amt:.2f}`")
+                    st.markdown(f"**Actual Carrier Tender:** `${r_amt:.2f}`")
+                    st.markdown(f"**EasyClaim 25% Contingency Fee:** `${f_amt:.2f}`")
+                    st.markdown(f"**Net Disbursed to Consumer:** `${max(0.0, r_amt - f_amt):.2f}`")
+
+                st.divider()
+                st.markdown("#### ⚖️ Formal Statutory Demand Dispatched to Carrier Legal Desk")
+                carrier_n = v_lead.get('carrier_name') or 'Carrier Legal Department'
+                flt_no = v_lead.get('incident_identifier') or 'Disrupted Service'
+                client_n = v_lead.get('claimant_name') or 'Authorized Claimant'
+                pnr_code = v_lead.get('pnr') or 'N/A'
+                framework = v_lead.get('regulatory_framework') or 'US DOT 14 CFR Part 260'
+                
+                demand_text = (
+                    f"FORMAL LEGAL DEMAND NOTICE & STATUTORY RESTITUTION FILING\n\n"
+                    f"TO: Legal & Regulatory Affairs, {carrier_n}\n"
+                    f"RE: Demand for Immediate Restitution under {framework}\n"
+                    f"CLAIMANT: {client_n} (Booking Reference / PNR: {pnr_code})\n"
+                    f"DISRUPTED SERVICE: {flt_no}\n\n"
+                    f"Notice is hereby served that claimant was subjected to a qualifying disruption on flight {flt_no}. "
+                    f"Pursuant to {framework}, passenger is legally entitled to full non-excludable cash restitution. "
+                    f"Demand is made for immediate disbursement of tender to the designated escrow account."
+                )
+                st.text_area("Statutory Demand Content Served to Legal Desk", value=demand_text, height=130, disabled=True)
+
+                st.markdown("#### 📥 Inbound Carrier Responses & Webhook Tenders")
+                if vendor_events:
+                    df_v_ev = pd.DataFrame(vendor_events)
+                    st.dataframe(df_v_ev[["created_at", "carrier_name", "event_type", "settlement_amount", "parsed_notes"]], use_container_width=True)
+                else:
+                    st.info("No inbound vendor responses or settlement webhooks recorded yet for this claim.")
+        else:
+            st.info("No dispatched claims available for vendor review.")
+    except Exception as e:
+        st.error(f"Error loading vendor communications: {e}")
+
+# --- TAB 6: WEBHOOK AUDIT ---
+with tabs[6]:
+    st.subheader("📥 Inbound Carrier Webhook Audit")
+    st.caption("Inspect raw webhook payloads received from carriers regarding settlements and dispute updates.")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text AS id, lead_id::text AS lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 100;")
             events = cur.fetchall()
         conn.close()
+
         if events:
-            st.dataframe(pd.DataFrame(events))
+            df_events = pd.DataFrame(events)
+            st.dataframe(df_events[["id", "carrier_name", "vertical", "event_type", "settlement_amount", "created_at"]], use_container_width=True)
         else:
-            st.info("No webhook events logged.")
+            st.info("No inbound webhook events recorded yet.")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error loading webhook audit: {e}")
 
-# --- TAB 5: DEAD-LETTER QUEUE (DLQ) ---
-with tabs[5]:
-    st.subheader("⚠️ Dead-Letter Queue (DLQ)")
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id::text AS id, carrier_name, claimant_name, 
-                       COALESCE(dispatch_attempts, 0) AS dispatch_attempts, 
-                       last_dispatch_error, status 
-                FROM leads 
-                WHERE status='dispatch_failed' OR last_dispatch_error IS NOT NULL;
-            """)
-            dlq = cur.fetchall()
-        conn.close()
-        if dlq:
-            st.dataframe(pd.DataFrame(dlq))
-            if user_role in ("super_admin", "claims_manager"):
-                sel_dlq = st.selectbox("Select Stalled Claim to Re-Queue", [d["id"] for d in dlq])
-                if st.button("🔄 Force Immediate Re-Dispatch", key=f"dlq_retry_{sel_dlq}"):
-                    conn = get_db()
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            UPDATE leads 
-                            SET status='opted_in', dispatch_attempts=0, 
-                                last_dispatch_error=NULL, next_dispatch_retry_at=NOW(), 
-                                updated_at=NOW() 
-                            WHERE id::text=%s;
-                        """, (sel_dlq,))
-                    conn.close()
-                    st.success("Claim requeued for carrier dispatch.")
-                    st.rerun()
-        else:
-            st.success("✅ Dead-Letter Queue is clear.")
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-# --- TAB 6: SYSTEM TELEMETRY & AUDIT LOGS (NEW) ---
-with tabs[6]:
-    st.subheader("📊 System Telemetry, Health & Audit Logs")
-    st.caption("Active connectivity diagnostics, service latencies, and transaction-level event telemetry.")
-
-    # Section A: Live Diagnostic Controls & Metrics
-    col_diag_btn, col_diag_time = st.columns([1.5, 2.5])
-    with col_diag_btn:
-        run_sweep = st.button("⚡ Run Instant Diagnostic Sweep", key="btn_run_diag")
-
-    if run_sweep or "diag_data" not in st.session_state:
-        try:
-            with st.spinner("Probing PostgreSQL, Gemini AI, and integration gateways..."):
-                diag_res = requests.get(f"{API_BASE}/api/v1/system/health-check", timeout=15)
-                if diag_res.status_code == 200:
-                    st.session_state.diag_data = diag_res.json()
-                else:
-                    st.session_state.diag_data = {"overall_status": "disrupted", "probes": {}}
-        except Exception as e:
-            st.session_state.diag_data = {"overall_status": "unreachable", "error": str(e), "probes": {}}
-
-    diag = st.session_state.get("diag_data", {})
-    overall_st = diag.get("overall_status", "unknown").upper()
-    
-    st.divider()
-    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-    status_icon = "🟢" if overall_st == "HEALTHY" else "🟡" if overall_st == "DEGRADED" else "🔴"
-    m_col1.metric("Core Gateway Status", f"{status_icon} {overall_st}")
-
-    db_probe = diag.get("probes", {}).get("database", {})
-    db_ms = db_probe.get("latency_ms", "N/A")
-    m_col2.metric("Database Latency", f"{db_ms} ms" if db_ms != "N/A" else "ERR")
-
-    ai_probe = diag.get("probes", {}).get("gemini_ai", {})
-    ai_ms = ai_probe.get("latency_ms", "N/A")
-    m_col3.metric("Gemini AI Latency", f"{ai_ms} ms" if ai_ms != "N/A" else "ERR")
+# --- TAB 7: DEAD-LETTER QUEUE (DLQ) ---
+with tabs[7]:
+    st.subheader("⚠️ Dead-Letter Queue (DLQ) & Dispatch Failures")
+    st.caption("Review leads where outbound dispatch failed repeatedly and trigger manual retries.")
 
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS c FROM leads WHERE status = 'dispatch_failed';")
-            dlq_count = cur.fetchone()["c"]
+            cur.execute("SELECT id::text AS id, vertical, carrier_name, claimant_email, dispatch_attempts, last_dispatch_error, last_dispatch_attempt_at FROM leads WHERE status = 'dispatch_failed' ORDER BY last_dispatch_attempt_at DESC;")
+            dlq_leads = cur.fetchall()
         conn.close()
-    except Exception:
-        dlq_count = "N/A"
-    m_col4.metric("Dead-Letter Queue Count", dlq_count)
 
-    # Detailed Probes Expansion
-    with st.expander("🔍 Detailed Integration Probes Breakdown", expanded=False):
-        st.json(diag.get("probes", {}))
+        if dlq_leads:
+            df_dlq = pd.DataFrame(dlq_leads)
+            st.dataframe(df_dlq, use_container_width=True)
+        else:
+            st.info("Dead-letter queue is clear. No failed dispatches found.")
+    except Exception as e:
+        st.error(f"Error loading DLQ: {e}")
 
-    # Section B: Database System Audit Logs
-    st.divider()
-    st.subheader("📜 Live Event Audit Log Stream")
-    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 2, 2])
-    with col_ctrl1:
-        auto_refresh = st.toggle("Live Tail (Auto-Refresh)", value=True, key="audit_live_tail_toggle")
-    with col_ctrl2:
-        refresh_rate = st.selectbox(
-            "Refresh Interval",
-            options=[3, 5, 10, 30],
-            index=1,
-            format_func=lambda x: f"Every {x}s",
-            key="audit_refresh_interval_select"
-        )
-    with col_ctrl3:
-        log_level_filter = st.selectbox(
-            "Log Level",
-            ["ALL", "INFO", "WARNING", "ERROR", "CRITICAL"],
-            key="audit_log_level_select"
-        )
-    poll_interval = refresh_rate if auto_refresh else None
-    @st.fragment(run_every=poll_interval)
-    def render_tab6_live_stream(selected_level):
-        c_status, c_btn = st.columns([6, 1])
-        with c_btn:
-            if st.button("🔄 Refresh", use_container_width=True, key="btn_audit_refresh_now"):
-                st.rerun(scope="fragment")
-        try:
-            conn = get_connection()
-            with conn.cursor() as cur:
-                query = """
-                    SELECT 
-                        created_at,
-                        service_name,
-                        event_category,
-                        log_level,
-                        message,
-                        lead_id::text,
-                        metadata
-                    FROM system_audit_logs
-                """
-                params = []
-                if selected_level and selected_level != "ALL":
-                    query += " WHERE log_level = %s"
-                    params.append(selected_level)
-                query += " ORDER BY created_at DESC LIMIT 150;"
-                cur.execute(query, tuple(params) if params else ())
-                cols = [desc[0] for desc in cur.description]
-                rows = cur.fetchall()
-            conn.close()
-            import pandas as pd
-            df = pd.DataFrame(rows, columns=cols)
-            if df.empty:
-                st.info("No audit logs found matching criteria.")
-                return
-            with c_status:
-                st.caption(f"Last updated: {pd.Timestamp.now().strftime('%H:%M:%S UTC')} — Displaying {len(df)} most recent events")
-            st.dataframe(
-                df,
-                use_container_width=True,
-                column_config={
-                    "created_at": st.column_config.DatetimeColumn("Timestamp", format="YYYY-MM-DD HH:mm:ss"),
-                    "log_level": st.column_config.TextColumn("Level"),
-                    "service_name": st.column_config.TextColumn("Service"),
-                    "event_category": st.column_config.TextColumn("Category"),
-                    "message": st.column_config.TextColumn("Message", width="large"),
-                    "lead_id": st.column_config.TextColumn("Lead UUID"),
-                    "metadata": st.column_config.Column("Metadata JSON"),
-                },
-                hide_index=True
+# --- TAB 8: SYSTEM TELEMETRY & HISTORICAL AUDIT LOGS (FULL SEARCH) ---
+with tabs[8]:
+    st.subheader("📊 System Telemetry & Historical Audit Logs")
+    st.caption("Search across the entire history of system telemetry, worker executions, email dispatches, and errors.")
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        log_level_filter = st.selectbox("Filter Log Level", ["All Levels", "INFO", "WARNING", "ERROR", "CRITICAL"], key="telemetry_level_filter")
+    with col_s2:
+        date_start = st.date_input("Start Date", value=None, key="telemetry_start_date")
+    with col_s3:
+        date_end = st.date_input("End Date", value=None, key="telemetry_end_date")
+
+    search_keyword = st.text_input("🔍 Full-Text Search Logs (Message, Service, Lead ID, or Keyword)", key="telemetry_keyword_search")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            sql = "SELECT id::text AS id, service_name, event_category, log_level, message, lead_id::text AS lead_id, metadata, created_at FROM system_audit_logs WHERE 1=1"
+            sql_params = []
+            if log_level_filter != "All Levels":
+                sql += " AND log_level = %s"
+                sql_params.append(log_level_filter)
+            if date_start:
+                sql += " AND created_at::date >= %s"
+                sql_params.append(date_start)
+            if date_end:
+                sql += " AND created_at::date <= %s"
+                sql_params.append(date_end)
+            if search_keyword:
+                sql += " AND (message ILIKE %s OR service_name ILIKE %s OR lead_id::text ILIKE %s OR metadata::text ILIKE %s)"
+                kw = f"%{search_keyword}%"
+                sql_params.extend([kw, kw, kw, kw])
+
+            sql += " ORDER BY created_at DESC LIMIT 5000;"
+            cur.execute(sql, tuple(sql_params))
+            found_logs = cur.fetchall()
+        conn.close()
+
+        if found_logs:
+            df_fl = pd.DataFrame(found_logs)
+            st.metric("Total Logs Matching Query", len(df_fl))
+            st.dataframe(df_fl[["created_at", "service_name", "event_category", "log_level", "message", "lead_id"]], use_container_width=True)
+
+            sel_lid = st.selectbox("Inspect Full Metadata for Log ID", df_fl["id"].tolist(), key="sel_log_meta_id")
+            selected_l = df_fl[df_fl["id"] == sel_lid].iloc[0]
+            st.markdown(f"**Service:** `{selected_l['service_name']}` | **Category:** `{selected_l['event_category']}` | **Level:** `{selected_l['log_level']}`")
+            st.markdown(f"**Message:** {selected_l['message']}")
+            st.json(selected_l["metadata"] or {})
+        else:
+            st.info("No logs found matching search criteria.")
+    except Exception as e:
+        st.error(f"Error querying telemetry logs: {e}")
+
+
+# --- TAB 7: CLAIM-SPECIFIC INTERACTION & AUDIT VIEWER (NEW) ---
+with tabs[7]:
+    st.subheader("🕵️ Claim-Specific Interaction & Communications Audit")
+    st.caption("Decipher and inspect all customer correspondence, vendor demand letters, transmission receipts, and billing/recovery logs by Claim ID.")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text AS id, carrier_name, vertical, claimant_name, claimant_email, status FROM leads ORDER BY updated_at DESC LIMIT 200;")
+            all_leads_dropdown = cur.fetchall()
+        conn.close()
+
+        if all_leads_dropdown:
+            selected_lead_id = st.selectbox(
+                "Select Claim ID to Audit All Interactions",
+                options=[l["id"] for l in all_leads_dropdown],
+                format_func=lambda x: next((f"ID: {x[:8]}... | Carrier: {l['carrier_name'] or 'N/A'} | Claimant: {l['claimant_name'] or 'Unclaimed'} ({l['status']})" for l in all_leads_dropdown if l["id"] == x), x),
+                key="select_audit_claim_id"
             )
-        except Exception as e:
-            st.error(f"Error reading telemetry logs: {e}")
-    render_tab6_live_stream(log_level_filter)
-    col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
-    with col_f1:
-        log_level_filter = st.selectbox("Log Level", ["ALL", "INFO", "WARN", "ERROR"], key="filter_log_level")
-    with col_f2:
-        log_limit = st.selectbox("Records", [25, 50, 100], index=1, key="filter_log_limit")
-    with col_f3:
-        st.write("") # Spacer
 
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            query = """
-                SELECT 
-                    created_at, service_name, event_category, log_level, message, 
-                    lead_id::text AS lead_id, metadata 
-                FROM system_audit_logs
-            """
-            params = []
-            if log_level_filter != "ALL":
-                query += " WHERE log_level = %s"
-                params.append(log_level_filter)
-            query += " ORDER BY created_at DESC LIMIT %s;"
-            params.append(log_limit)
-            cur.execute(query, tuple(params))
-            logs = cur.fetchall()
-        conn.close()
+            # Fetch full lead details
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM leads WHERE id::text = %s;", (selected_lead_id,))
+                lead_row = cur.fetchone()
 
-        if logs:
-            df_logs = pd.DataFrame(logs)
-            st.dataframe(df_logs[["created_at", "service_name", "event_category", "log_level", "message", "lead_id"]])
+                # Fetch associated carrier inbound events
+                cur.execute("SELECT * FROM carrier_inbound_events WHERE lead_id::text = %s ORDER BY created_at DESC;", (selected_lead_id,))
+                inbound_events = cur.fetchall()
+
+                # Fetch associated audit logs
+                cur.execute("SELECT * FROM system_audit_logs WHERE lead_id::text = %s ORDER BY created_at DESC;", (selected_lead_id,))
+                lead_audit_logs = cur.fetchall()
+            conn.close()
+
+            if lead_row:
+                c_col1, c_col2 = st.columns(2)
+                with c_col1:
+                    st.markdown("#### 👤 Customer & Onboarding Information")
+                    st.markdown(f"**Claimant Name:** `{lead_row.get('claimant_name') or 'Pending Onboarding'}`")
+                    st.markdown(f"**Email:** `{lead_row.get('claimant_email') or 'N/A'}`")
+                    st.markdown(f"**Phone:** `{lead_row.get('claimant_phone') or 'N/A'}`")
+                    st.markdown(f"**Address:** `{lead_row.get('claimant_address') or 'N/A'}`")
+                    st.markdown(f"**PNR / Account Number:** `{lead_row.get('pnr') or lead_row.get('account_number') or 'N/A'}`")
+                    st.markdown(f"**Digital Signature:** `{lead_row.get('digital_signature') or 'Not Signed Yet'}`")
+
+                with c_col2:
+                    st.markdown("#### 💰 Financials, Recovery & Billing")
+                    rec_amt = float(lead_row.get('recovery_amount') or 0.0)
+                    est_amt = float(lead_row.get('estimated_compensation') or 0.0)
+                    fee_amt = float(lead_row.get('fee_collected') or (rec_amt * 0.25))
+                    st.markdown(f"**Estimated Compensation:** `${est_amt:.2f}`")
+                    st.markdown(f"**Actual Recovery Amount:** `${rec_amt:.2f}`")
+                    st.markdown(f"**Platform 25% Contingency Fee:** `${fee_amt:.2f}`")
+                    st.markdown(f"**Current Pipeline Status:** `{str(lead_row.get('status')).upper()}`")
+                    st.markdown(f"**Regulatory Framework:** `{lead_row.get('regulatory_framework') or 'N/A'}`")
+
+                st.divider()
+                st.markdown("#### ✉️ Vendor Demand Letter & Delivery Audit")
+                st.markdown(f"**Target Carrier / Vendor:** `{lead_row.get('carrier_name') or 'N/A'}`")
+                st.markdown(f"**Source Post URL:** `{lead_row.get('post_url') or 'Direct Inbound'}`")
+                
+                st.markdown("**Outreach & Demand Verbiage:**")
+                st.text_area("Recorded Outreach Copy / Statutory Notice", value=lead_row.get('outreach_copy') or "No outreach copy recorded.", height=120, disabled=True, key="audit_outreach_view")
+
+                st.markdown("#### 📥 Vendor Responses & Inbound Webhook Events")
+                if inbound_events:
+                    df_in_ev = pd.DataFrame(inbound_events)
+                    st.dataframe(df_in_ev[["created_at", "event_type", "carrier_name", "settlement_amount", "parsed_notes"]], use_container_width=True)
+                else:
+                    st.info("No inbound responses or settlement webhooks recorded yet for this Claim ID.")
+
+                st.markdown("#### 📋 Associated System Audit Trails & Dispatch Logs")
+                if lead_audit_logs:
+                    df_l_logs = pd.DataFrame(lead_audit_logs)
+                    st.dataframe(df_l_logs[["created_at", "service_name", "event_category", "log_level", "message"]], use_container_width=True)
+                else:
+                    st.info("No system audit logs recorded specifically for this Claim ID.")
+            else:
+                st.warning("Selected claim record could not be loaded from database.")
         else:
-            st.info("No audit logs matching query.")
+            st.info("No claims available in database.")
     except Exception as e:
-        st.error(f"Failed to fetch audit log telemetry: {e}")
+        st.error(f"Error loading claim interaction viewer: {e}")
+
 
 # --- TAB 7: OPERATIONS MANUAL ---
 with tabs[7]:
