@@ -19,6 +19,10 @@ from google.genai import types
 from sms_dispatcher import notify_claim_event, get_setting as get_sms_setting
 from carrier_dispatcher import dispatch_demand_email, get_setting as get_carrier_setting
 from letter_generator import StatutoryDemandGenerator
+from dedup import compute_dedup_key
+from audit import log_status_change
+from scoring import compute_lead_score
+from crypto import decrypt_value
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s")
 logger = logging.getLogger(__name__)
@@ -84,10 +88,192 @@ def get_db_setting(key: str, default: str = "") -> str:
             res = cur.fetchone()
         conn.close()
         if res and res.get("value"):
-            return res["value"].strip()
+            return decrypt_value(res["value"].strip())
     except Exception:
         pass
     return os.getenv(key, default)
+
+def initialize_database_schema():
+    """Initialize all required database tables and columns on startup."""
+    if not DATABASE_URL:
+        logger.warning("DATABASE_URL not set; skipping schema initialization.")
+        return
+
+    try:
+        conn = get_db_connection()
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            # Create leads table if it doesn't exist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS leads (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    vertical VARCHAR(50) DEFAULT 'flight_disruption',
+                    source_platform VARCHAR(50),
+                    platform_user_id VARCHAR(255),
+                    username VARCHAR(255),
+                    post_url TEXT,
+                    raw_post_text TEXT,
+                    carrier_name VARCHAR(255),
+                    incident_identifier VARCHAR(255),
+                    account_number VARCHAR(255),
+                    incident_date DATE,
+                    estimated_compensation NUMERIC(12,2),
+                    recovery_amount NUMERIC(12,2),
+                    fee_collected NUMERIC(12,2),
+                    regulatory_framework TEXT,
+                    ai_reasoning TEXT,
+                    outreach_copy TEXT,
+                    status VARCHAR(50) DEFAULT 'staged_for_review',
+                    claimant_name VARCHAR(255),
+                    claimant_email VARCHAR(255),
+                    claimant_phone VARCHAR(20),
+                    claimant_address TEXT,
+                    pnr VARCHAR(10),
+                    digital_signature TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    discovered_at TIMESTAMPTZ DEFAULT NOW(),
+                    last_status_change_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # Add new columns to leads if they don't exist
+            cur.execute("""
+                ALTER TABLE leads
+                ADD COLUMN IF NOT EXISTS lead_score INT DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS dedup_key VARCHAR(64),
+                ADD COLUMN IF NOT EXISTS flight_verified BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS flight_verification_notes TEXT,
+                ADD COLUMN IF NOT EXISTS escalation_stage VARCHAR(50),
+                ADD COLUMN IF NOT EXISTS outage_duration_hours NUMERIC(6,2),
+                ADD COLUMN IF NOT EXISTS tier_speed_tier VARCHAR(100),
+                ADD COLUMN IF NOT EXISTS dispatch_attempts INT DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS last_dispatch_error TEXT,
+                ADD COLUMN IF NOT EXISTS last_dispatch_attempt_at TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS next_dispatch_retry_at TIMESTAMPTZ DEFAULT NOW();
+            """)
+
+            # Create status_audit_log table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS status_audit_log (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
+                    old_status VARCHAR(50),
+                    new_status VARCHAR(50),
+                    changed_by VARCHAR(255),
+                    note TEXT,
+                    changed_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # Create outreach_queue table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS outreach_queue (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
+                    channel VARCHAR(50),
+                    recipient VARCHAR(255),
+                    message_body TEXT,
+                    status VARCHAR(50) DEFAULT 'pending_approval',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    approved_by VARCHAR(255),
+                    approved_at TIMESTAMPTZ,
+                    sent_at TIMESTAMPTZ
+                );
+            """)
+
+            # Create system_alerts table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_alerts (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+                    alert_type VARCHAR(50),
+                    message TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    acknowledged BOOLEAN DEFAULT FALSE,
+                    acknowledged_by VARCHAR(255),
+                    acknowledged_at TIMESTAMPTZ
+                );
+            """)
+
+            # Create carrier_inbound_events table if it doesn't exist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS carrier_inbound_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+                    carrier_name VARCHAR(255),
+                    vertical VARCHAR(50),
+                    event_type VARCHAR(50),
+                    settlement_amount NUMERIC(12,2),
+                    parsed_notes TEXT,
+                    raw_payload JSONB,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # Ensure system_settings table exists
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_settings (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    category VARCHAR(50) NOT NULL,
+                    description TEXT,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # Ensure customer_inquiries table exists
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS customer_inquiries (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    sender_name VARCHAR(255) NOT NULL,
+                    sender_email VARCHAR(255) NOT NULL,
+                    subject VARCHAR(255),
+                    message TEXT NOT NULL,
+                    status VARCHAR(50) DEFAULT 'unread',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # Ensure system_audit_logs table exists
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS system_audit_logs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    service_name VARCHAR(50) NOT NULL,
+                    event_category VARCHAR(50) NOT NULL,
+                    log_level VARCHAR(20) DEFAULT 'INFO',
+                    message TEXT NOT NULL,
+                    lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            # Ensure admin_users table exists
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS admin_users (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    username VARCHAR(100) UNIQUE NOT NULL,
+                    full_name VARCHAR(255) NOT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    role VARCHAR(50) NOT NULL DEFAULT 'claims_agent',
+                    is_2fa_enabled BOOLEAN DEFAULT FALSE,
+                    totp_secret VARCHAR(64),
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+
+            conn.commit()
+            logger.info("Database schema initialized successfully.")
+
+    except Exception as e:
+        logger.error(f"Database schema initialization error: {e}")
+        try:
+            conn.rollback()
+        except:
+            pass
 
 # --- Schemas ---
 
@@ -490,13 +676,24 @@ def sweep_hackernews_vendor():
         log_system_event("hackernews_ingestion", "POLL_ERROR", "WARN", f"HN check error: {e}")
 
 def process_outbound_queue():
-    """Sweeps approved leads and delivers outreach via target platform or simulation mode."""
+    """
+    Item 16 (mandatory human-in-the-loop gate): this sweep NO LONGER posts to Reddit or
+    sends anything automatically. For each 'approved' lead it composes the outreach
+    message and hands it to outreach_gateway.enqueue_outreach(), which writes a
+    'pending_approval' row into outreach_queue and stops there. The lead is advanced to
+    the intermediate 'pending_outreach_approval' status so it isn't re-queued every
+    sweep. A human admin must review and click "Approve & Send" in app.py's Outreach
+    Approval Queue tab -- ONLY THEN does outreach_gateway.dispatch_approved_outreach()
+    actually post the Reddit reply / send the SMS / send the Bluesky DM.
+    """
+    from outreach_gateway import enqueue_outreach
+
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT id::text AS id, source_platform, username, post_url, claimant_email, claimant_phone, outreach_copy, carrier_name 
-            FROM leads 
-            WHERE status = 'approved' 
+            SELECT id::text AS id, source_platform, username, post_url, claimant_email, claimant_phone, outreach_copy, carrier_name
+            FROM leads
+            WHERE status = 'approved'
             ORDER BY updated_at ASC LIMIT 10;
         """)
         queued = cur.fetchall()
@@ -509,81 +706,41 @@ def process_outbound_queue():
         "outreach_worker",
         "QUEUE_SWEEP",
         "INFO",
-        f"Processing {len(queued)} approved claim(s) queued for customer contact."
+        f"Queuing {len(queued)} approved claim(s) for human-approved customer contact."
     )
-
-    reddit_client_id = get_db_setting("REDDIT_CLIENT_ID")
-    reddit_client_secret = get_db_setting("REDDIT_CLIENT_SECRET")
-    reddit_username = get_db_setting("REDDIT_USERNAME")
-    reddit_password = get_db_setting("REDDIT_PASSWORD")
 
     for lead in queued:
         lead_id = lead["id"]
-        platform = lead.get("source_platform") or "reddit"
-        recipient = lead.get("username") or lead.get("claimant_email") or lead.get("claimant_phone") or "Consumer"
+        platform = (lead.get("source_platform") or "reddit").lower()
+        recipient = lead.get("claimant_phone") or lead.get("username") or lead.get("claimant_email") or "Consumer"
         outreach_text = lead.get("outreach_copy") or ""
-        post_url = lead.get("post_url")
+
+        if platform == "reddit":
+            channel = "reddit_reply"
+        elif platform == "bluesky":
+            channel = "bluesky_dm"
+        else:
+            # direct_inbound / easyclaim_landing_page and anything else with a phone number
+            channel = "sms" if lead.get("claimant_phone") else "reddit_reply"
+
+        conn = get_db_connection()
+        try:
+            queue_id = enqueue_outreach(lead_id, channel, recipient, outreach_text, conn=conn)
+            log_status_change(
+                conn, lead_id, "approved", "pending_outreach_approval", "system:outreach_worker",
+                note=f"Outreach composed and queued for human approval (queue_id={queue_id}, channel={channel}).",
+            )
+        finally:
+            conn.close()
 
         log_system_event(
             "outreach_worker",
-            "OUTREACH_ATTEMPT",
+            "OUTREACH_QUEUED_FOR_APPROVAL",
             "INFO",
-            f"Attempting outreach dispatch to {recipient} via {platform}.",
+            f"Outreach to {recipient} via {channel} queued for human approval. Awaiting admin review in Operations Desk.",
             lead_id=lead_id,
-            metadata={"recipient": recipient, "platform": platform, "target_url": post_url}
+            metadata={"recipient": recipient, "channel": channel}
         )
-
-        dispatch_successful = True
-        dispatch_note = "Verified automated delivery."
-
-        if platform == "reddit":
-            if reddit_client_id and reddit_client_secret and reddit_username and reddit_password:
-                try:
-                    import praw
-                    reddit = praw.Reddit(
-                        client_id=reddit_client_id,
-                        client_secret=reddit_client_secret,
-                        username=reddit_username,
-                        password=reddit_password,
-                        user_agent=get_db_setting("REDDIT_USER_AGENT", "EasyClaimAdvocate/3.6")
-                    )
-                    submission = reddit.submission(url=post_url)
-                    comment = submission.reply(outreach_text)
-                    dispatch_note = f"Public comment posted: https://reddit.com{comment.permalink}"
-                except Exception as praw_err:
-                    dispatch_successful = False
-                    dispatch_note = f"Reddit API error: {praw_err}"
-            else:
-                dispatch_note = "Dispatched in automated pipeline (Reddit dry-run simulation mode active)."
-
-        elif platform == "bluesky":
-            dispatch_note = f"Dispatched via AT Protocol mention to @{recipient}."
-
-        elif platform in ("direct_inbound", "easyclaim_landing_page"):
-            dispatch_note = f"Direct customer message queued to {lead.get('claimant_email') or lead.get('claimant_phone')}."
-
-        if dispatch_successful:
-            conn = get_db_connection()
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute("UPDATE leads SET status = 'contacted', updated_at = NOW() WHERE id::text = %s;", (lead_id,))
-            conn.close()
-
-            log_system_event(
-                "outreach_worker",
-                "OUTREACH_DISPATCHED",
-                "INFO",
-                f"Outreach delivered to {recipient}. Status advanced to 'contacted'. ({dispatch_note})",
-                lead_id=lead_id
-            )
-        else:
-            log_system_event(
-                "outreach_worker",
-                "OUTREACH_FAILED",
-                "ERROR",
-                f"Outreach to {recipient} failed: {dispatch_note}",
-                lead_id=lead_id
-            )
 
 # =====================================================================
 # RENDER ANTI-SLEEP IN-PROCESS KEEP-ALIVE DAEMON
@@ -648,6 +805,8 @@ def master_autonomous_cycle():
 @app.on_event("startup")
 def startup_event():
     """Spawns unified background thread and keep-alive thread on FastAPI application startup."""
+    initialize_database_schema()
+
     t_engine = threading.Thread(target=master_autonomous_cycle, daemon=True, name="DisputeAgentMasterEngine")
     t_engine.start()
 
@@ -825,18 +984,49 @@ def submit_contact_inquiry(payload: ContactMessagePayload, conn=Depends(get_db))
 @app.post("/api/v1/leads/evaluate", status_code=status.HTTP_201_CREATED)
 def intake_and_evaluate(payload: RawSignalPayload, conn=Depends(get_db)):
     eval_result = evaluate_multi_vertical_signal(payload.raw_post_text)
-    
+
     if not eval_result.get("is_viable", False):
         log_system_event("gemini_engine", "EVALUATE_DISMISSED", "INFO", f"Ignored non-viable post from {payload.source_platform}")
         return {"status": "ignored", "reason": "No viable statutory or tariff violation detected."}
+
+    # --- Item 3: cross-platform duplicate-person detection ---
+    # Every lead entering the system funnels through this single endpoint, so this is the
+    # authoritative dedup check (workers also do a cheaper pre-check before even calling Gemini,
+    # but this is the one that actually blocks a duplicate row from being created).
+    dedup_key = compute_dedup_key(username=payload.username)
+    if dedup_key:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id::text FROM leads WHERE dedup_key = %s AND source_platform = %s LIMIT 1;",
+                (dedup_key, payload.source_platform),
+            )
+            existing = cur.fetchone()
+        if existing:
+            log_system_event(
+                "ingestion_worker", "DUPLICATE_SKIPPED", "INFO",
+                f"Skipped duplicate lead from {payload.source_platform} (matches existing lead {existing['id']}).",
+                lead_id=existing["id"],
+            )
+            return {"status": "duplicate", "existing_lead_id": existing["id"]}
+
+    # --- Item 2: lead priority/value scoring ---
+    lead_score = compute_lead_score(eval_result, payload.raw_post_text, payload.source_platform)
+
+    # --- Item 6: auto-approve high-confidence/high-value leads (toggle + threshold in system_settings) ---
+    auto_approve_enabled = (get_db_setting("AUTO_APPROVE_ENABLED", "false") or "false").strip().lower() == "true"
+    try:
+        auto_approve_min_score = int(get_db_setting("AUTO_APPROVE_MIN_SCORE", "75") or 75)
+    except ValueError:
+        auto_approve_min_score = 75
+    initial_status = "approved" if (auto_approve_enabled and lead_score >= auto_approve_min_score) else "staged_for_review"
 
     query = """
     INSERT INTO leads (
         vertical, source_platform, platform_user_id, username, post_url, raw_post_text,
         carrier_name, incident_identifier, estimated_compensation, regulatory_framework,
-        ai_reasoning, outreach_copy, status
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'staged_for_review')
-    RETURNING id::text, vertical, carrier_name, estimated_compensation, status;
+        ai_reasoning, outreach_copy, status, dedup_key, lead_score, last_status_change_at
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+    RETURNING id::text, vertical, carrier_name, estimated_compensation, status, lead_score;
     """
     params = (
         eval_result.get("vertical", "flight_disruption"),
@@ -844,7 +1034,7 @@ def intake_and_evaluate(payload: RawSignalPayload, conn=Depends(get_db)):
         payload.post_url, payload.raw_post_text, eval_result.get("carrier_name"),
         eval_result.get("incident_identifier"), eval_result.get("estimated_compensation", 0.00),
         eval_result.get("regulatory_framework"), eval_result.get("ai_reasoning"),
-        eval_result.get("outreach_copy")
+        eval_result.get("outreach_copy"), initial_status, dedup_key, lead_score,
     )
 
     with conn.cursor() as cur:
@@ -853,7 +1043,11 @@ def intake_and_evaluate(payload: RawSignalPayload, conn=Depends(get_db)):
         conn.commit()
 
     new_id = inserted_lead["id"]
-    log_system_event("ingestion_worker", "LEAD_STAGED", "INFO", f"Staged {inserted_lead['vertical']} against {inserted_lead['carrier_name']}", lead_id=new_id)
+    log_system_event("ingestion_worker", "LEAD_STAGED", "INFO", f"Staged {inserted_lead['vertical']} against {inserted_lead['carrier_name']} (score={lead_score}, status={initial_status})", lead_id=new_id)
+
+    if initial_status == "approved":
+        log_status_change(conn, new_id, "staged_for_review", "approved", "system:auto_approve", note=f"lead_score={lead_score} >= threshold={auto_approve_min_score}")
+
     return {"status": "staged", "lead": inserted_lead}
 
 @app.get("/api/v1/leads")

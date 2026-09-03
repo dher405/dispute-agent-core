@@ -2,10 +2,13 @@ import os
 import sys
 import time
 import logging
+import json
 import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from dedup import compute_dedup_key
+from crypto import decrypt_value
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - [BSKY] - %(message)s")
@@ -14,7 +17,7 @@ logger = logging.getLogger("BlueskyIngestion")
 DATABASE_URL = os.getenv("DATABASE_URL")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://dispute-api-xyl7.onrender.com")
 
-QUERY_KEYWORDS = [
+DEFAULT_QUERY_KEYWORDS = [
     "flight cancelled",
     "flight delayed",
     "united airlines delay",
@@ -26,48 +29,111 @@ QUERY_KEYWORDS = [
     "deposit withheld"
 ]
 
+# Negative signals
+NEGATIVE_SIGNALS = [
+    "jk", "just kidding", "lol", "meme", "joke",
+    "already resolved", "fixed it", "not a problem", "scam alert", "fake"
+]
+
 def get_db():
+    if not DATABASE_URL:
+        return None
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
-def is_duplicate(post_url: str) -> bool:
+def get_setting(key: str, default: str = "") -> str:
+    """Fetch setting from system_settings table."""
+    try:
+        conn = get_db()
+        if not conn:
+            return os.getenv(key, default)
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM system_settings WHERE key = %s;", (key,))
+            res = cur.fetchone()
+        conn.close()
+        if res and res.get("value"):
+            return decrypt_value(res["value"].strip())
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+def is_duplicate(post_url: str, handle: str = None) -> bool:
+    """Check for duplicate by URL or dedup key."""
     if not DATABASE_URL:
         return False
     try:
         conn = get_db()
         with conn.cursor() as cur:
+            # Check by URL
             cur.execute("SELECT 1 FROM leads WHERE post_url = %s LIMIT 1;", (post_url,))
-            res = cur.fetchone()
+            if cur.fetchone():
+                return True
+
+            # Check by dedup key (handle-based)
+            if handle:
+                dedup_key = compute_dedup_key(username=handle)
+                if dedup_key:
+                    cur.execute("SELECT 1 FROM leads WHERE dedup_key = %s AND source_platform = 'bluesky' LIMIT 1;", (dedup_key,))
+                    if cur.fetchone():
+                        return True
         conn.close()
-        return res is not None
+        return False
     except Exception as e:
         logger.error(f"Duplicate check failed: {e}")
         return False
+
+def has_negative_signals(text: str) -> bool:
+    """Check if text contains negative signals."""
+    text_lower = text.lower()
+    return any(signal in text_lower for signal in NEGATIVE_SIGNALS)
 
 def search_bluesky():
     endpoint = "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts"
     logger.info("Polling Bluesky public feed for statutory consumer disputes...")
 
-    for query in QUERY_KEYWORDS:
+    # Get configurable queries from database or use defaults
+    queries_json = get_setting("BLUESKY_QUERIES")
+    try:
+        queries = json.loads(queries_json) if queries_json else DEFAULT_QUERY_KEYWORDS
+    except:
+        queries = DEFAULT_QUERY_KEYWORDS
+
+    for query in queries:
         try:
             params = {"q": query, "limit": 10, "sort": "latest"}
             res = requests.get(endpoint, params=params, timeout=10)
-            
+
+            if res.status_code == 403 or res.status_code == 429:
+                logger.warning(f"Bluesky rate limited or forbidden. Backing off and retrying with exponential backoff.")
+                time.sleep(min(300, 10 * (len(queries) - queries.index(query))))
+                continue
+
             if res.status_code != 200:
-                logger.warning(f"Bluesky query '{query}' failed with status {res.status_code}")
+                logger.warning(f"Bluesky query '{query}' failed with status {res.status_code}: {res.text}")
                 continue
 
             posts = res.json().get("posts", [])
             for p in posts:
                 author = p.get("author", {})
                 record = p.get("record", {})
-                
+
                 did = author.get("did")
                 handle = author.get("handle")
                 rkey = p.get("uri", "").split("/")[-1]
                 post_url = f"https://bsky.app/profile/{handle}/post/{rkey}"
                 text = record.get("text", "").strip()
 
-                if len(text) < 30 or is_duplicate(post_url):
+                # Pre-filter by length
+                if len(text) < 30:
+                    continue
+
+                # Check for negative signals (jokes, resolved, etc)
+                if has_negative_signals(text):
+                    logger.debug(f"Skipping post with negative signals: {text[:50]}")
+                    continue
+
+                # Check for duplicates
+                if is_duplicate(post_url, handle):
+                    logger.debug(f"Duplicate detected for user {handle}")
                     continue
 
                 payload = {

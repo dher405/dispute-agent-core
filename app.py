@@ -10,6 +10,9 @@ import bcrypt
 import pyotp
 import qrcode
 from dotenv import load_dotenv
+from dedup import compute_dedup_key
+from crypto import encrypt_value, decrypt_value
+from audit import log_status_change
 
 load_dotenv()
 
@@ -314,57 +317,67 @@ with st.sidebar:
         # --- 3RD PARTY VENDOR & API CREDENTIALS CONFIGURATION ---
         st.divider()
         st.subheader('🔑 3rd Party Vendor & API Integration Vault')
-        st.caption('Configure and persist credentials for social automation, AT Protocol relays, and SMTP carrier dispatches.')
+        st.caption('Configure and persist credentials for social automation, AT Protocol relays, SMTP carrier dispatches, and outreach automation. Values are encrypted at rest.')
         try:
             conn = get_db()
             with conn.cursor() as cur:
-                cur.execute("SELECT key, value FROM system_settings WHERE category IN ('reddit_api', 'bluesky_api', 'smtp_gateway', 'twilio', 'stripe') ORDER BY key;")
-                existing_settings = dict(cur.fetchall())
+                cur.execute("SELECT key, value FROM system_settings WHERE category IN ('reddit_api', 'bluesky_api', 'smtp_gateway', 'twilio', 'stripe', 'twitter', 'review_sites', 'flight_verification', 'auto_approve', 'monitoring') ORDER BY key;")
+                settings_rows = cur.fetchall()
             conn.close()
-            tab_r, tab_b, tab_s, tab_tw, tab_pay = st.tabs(['🤖 Reddit API (OAuth)', '🦋 Bluesky AT Protocol', '⚖️ SMTP / Carrier Legal', '📱 Twilio SMS', '💳 Stripe Payouts'])
+            # Item 17: values are encrypted at rest in the DB; decrypt for display/editing.
+            existing_settings = {row["key"]: (decrypt_value(row["value"]) if row["value"] else row["value"]) for row in settings_rows}
+
+            tab_r, tab_b, tab_s, tab_tw, tab_pay, tab_x, tab_rev, tab_fl, tab_auto = st.tabs([
+                '🤖 Reddit API (OAuth)', '🦋 Bluesky AT Protocol', '⚖️ SMTP / Carrier Legal',
+                '📱 Twilio SMS', '💳 Stripe Payouts', '𝕏 Twitter/X', '⭐ Review Sites',
+                '✈️ Flight Verification', '✅ Auto-Approve'
+            ])
             with tab_r:
                 st.markdown('#### Reddit OAuth Script Application Configuration')
                 st.caption('Required for automated thread replies and direct messages under the Responsible Builder Policy.')
                 col_r1, col_r2 = st.columns(2)
                 with col_r1:
-                    r_client_id = st.text_input('Reddit Client ID', value=existing_settings.get('reddit_client_id', ''), key='cfg_reddit_client_id')
-                    r_client_secret = st.text_input('Reddit Client Secret', value=existing_settings.get('reddit_client_secret', ''), type='password', key='cfg_reddit_client_secret')
-                    r_user_agent = st.text_input('Custom User-Agent Header', value=existing_settings.get('reddit_user_agent', 'python:EasyClaimDisputeAgent:v1.0 (by /u/EasyClaimApp)'), key='cfg_reddit_user_agent')
+                    r_client_id = st.text_input('Reddit Client ID', value=existing_settings.get('REDDIT_CLIENT_ID', existing_settings.get('reddit_client_id', '')), key='cfg_reddit_client_id')
+                    r_client_secret = st.text_input('Reddit Client Secret', value=existing_settings.get('REDDIT_CLIENT_SECRET', existing_settings.get('reddit_client_secret', '')), type='password', key='cfg_reddit_client_secret')
+                    r_user_agent = st.text_input('Custom User-Agent Header', value=existing_settings.get('REDDIT_USER_AGENT', existing_settings.get('reddit_user_agent', 'EasyClaimAdvocate/3.6')), key='cfg_reddit_user_agent')
                 with col_r2:
-                    r_username = st.text_input('Reddit Service Account Username', value=existing_settings.get('reddit_username', ''), key='cfg_reddit_username')
-                    r_password = st.text_input('Reddit Account Password', value=existing_settings.get('reddit_password', ''), type='password', key='cfg_reddit_password')
-                    r_subreddits = st.text_area('Subreddits to Monitor (Comma separated)', value=existing_settings.get('reddit_subreddits', 'unitedairlines, delta, americanairlines, flights, travel, Comcast, Comcast_Xfinity'), height=68, key='cfg_reddit_subreddits')
+                    r_username = st.text_input('Reddit Service Account Username', value=existing_settings.get('REDDIT_USERNAME', existing_settings.get('reddit_username', '')), key='cfg_reddit_username')
+                    r_password = st.text_input('Reddit Account Password', value=existing_settings.get('REDDIT_PASSWORD', existing_settings.get('reddit_password', '')), type='password', key='cfg_reddit_password')
+                    r_subreddits = st.text_area('Subreddits to Monitor (comma separated)', value=existing_settings.get('MONITORED_SUBREDDITS', existing_settings.get('reddit_subreddits', 'unitedairlines,delta,americanairlines,southwestairlines,comcast,ATT,Tenant,mildlyinfuriating')), height=68, key='cfg_reddit_subreddits')
                 if st.button('💾 Save Reddit Credentials', key='btn_save_reddit_cfg'):
                     conn = get_db()
                     with conn.cursor() as cur:
                         records = [
-                            ('reddit_client_id', r_client_id, 'reddit_api', 'OAuth Client ID for Reddit Data API'),
-                            ('reddit_client_secret', r_client_secret, 'reddit_api', 'OAuth Client Secret for Reddit Data API'),
-                            ('reddit_username', r_username, 'reddit_api', 'Designated Reddit service username'),
-                            ('reddit_password', r_password, 'reddit_api', 'Reddit service account password'),
-                            ('reddit_user_agent', r_user_agent, 'reddit_api', 'Reddit RFC compliant user-agent string'),
-                            ('reddit_subreddits', r_subreddits, 'reddit_api', 'Active subreddits monitored by scraper daemon')
+                            ('REDDIT_CLIENT_ID', r_client_id, 'reddit_api', 'OAuth Client ID for Reddit Data API'),
+                            ('REDDIT_CLIENT_SECRET', r_client_secret, 'reddit_api', 'OAuth Client Secret for Reddit Data API'),
+                            ('REDDIT_USERNAME', r_username, 'reddit_api', 'Designated Reddit service username'),
+                            ('REDDIT_PASSWORD', r_password, 'reddit_api', 'Reddit service account password'),
+                            ('REDDIT_USER_AGENT', r_user_agent, 'reddit_api', 'Reddit RFC compliant user-agent string'),
+                            ('MONITORED_SUBREDDITS', r_subreddits, 'monitoring', 'Active subreddits monitored by scraper daemon')
                         ]
                         for k, v, cat, desc in records:
+                            # Item 17: encrypt every credential value before it touches the DB.
+                            stored_val = encrypt_value(v) if v else v
                             cur.execute("""
                                 INSERT INTO system_settings (key, value, category, description, updated_at)
                                 VALUES (%s, %s, %s, %s, NOW())
-                                ON CONFLICT (key) DO UPDATE 
+                                ON CONFLICT (key) DO UPDATE
                                 SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
-                            """, (k, v, cat, desc))
+                            """, (k, stored_val, cat, desc))
                     conn.close()
                     st.success('Reddit OAuth credentials saved to system_settings.')
                     st.rerun()
             with tab_b:
                 st.markdown('#### Bluesky Social & AT Protocol Integration')
-                st.caption('Configure Bluesky handle and App Passwords to poll the AT Protocol firehose and reply.')
+                st.caption('Configure the Bluesky handle/app password used for future authenticated AT Protocol DM outreach, and the search queries used by the public-feed scraper.')
                 col_b1, col_b2 = st.columns(2)
                 with col_b1:
                     b_handle = st.text_input('Bluesky Handle / DID (e.g. easyclaim.bsky.social)', value=existing_settings.get('bluesky_handle', ''), key='cfg_bluesky_handle')
                     b_app_password = st.text_input('Bluesky App Password', value=existing_settings.get('bluesky_app_password', ''), type='password', key='cfg_bluesky_app_password')
                 with col_b2:
                     b_pds_url = st.text_input('PDS Endpoint URL', value=existing_settings.get('bluesky_pds_url', 'https://bsky.social'), key='cfg_bluesky_pds_url')
-                    b_keywords = st.text_area('Target Keywords', value=existing_settings.get('bluesky_keywords', 'flight canceled, flight delayed, united airlines, delta cancel, comcast outage, spectrum down'), height=68, key='cfg_bluesky_keywords')
+                    b_keywords = st.text_area('Target Keywords (AT Protocol DM relay)', value=existing_settings.get('bluesky_keywords', 'flight canceled, flight delayed, united airlines, delta cancel, comcast outage, spectrum down'), height=68, key='cfg_bluesky_keywords')
+                b_queries = st.text_area('Bluesky Search Queries (JSON array, used by the public-feed scraper)', value=existing_settings.get('BLUESKY_QUERIES', '["flight cancelled", "flight delayed"]'), height=68, key='cfg_bluesky_queries')
                 if st.button('💾 Save Bluesky Credentials', key='btn_save_bluesky_cfg'):
                     conn = get_db()
                     with conn.cursor() as cur:
@@ -372,46 +385,49 @@ with st.sidebar:
                             ('bluesky_handle', b_handle, 'bluesky_api', 'Bluesky account identifier'),
                             ('bluesky_app_password', b_app_password, 'bluesky_api', 'App-specific password'),
                             ('bluesky_pds_url', b_pds_url, 'bluesky_api', 'Bluesky personal data server host'),
-                            ('bluesky_keywords', b_keywords, 'bluesky_api', 'Keywords scanned across AT Protocol')
+                            ('bluesky_keywords', b_keywords, 'bluesky_api', 'Keywords scanned across AT Protocol'),
+                            ('BLUESKY_QUERIES', b_queries, 'monitoring', 'JSON array of search queries used by the public Bluesky feed scraper')
                         ]
                         for k, v, cat, desc in records:
+                            stored_val = encrypt_value(v) if v else v
                             cur.execute("""
                                 INSERT INTO system_settings (key, value, category, description, updated_at)
                                 VALUES (%s, %s, %s, %s, NOW())
-                                ON CONFLICT (key) DO UPDATE 
+                                ON CONFLICT (key) DO UPDATE
                                 SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
-                            """, (k, v, cat, desc))
+                            """, (k, stored_val, cat, desc))
                     conn.close()
                     st.success('Bluesky AT Protocol credentials successfully persisted.')
                     st.rerun()
             with tab_s:
                 st.markdown('#### SMTP Carrier Legal Desk Transmission Gateway')
-                st.caption('Configure the outbound SMTP mailer for delivering formal ReportLab PDF demands.')
+                st.caption('Configure the outbound SMTP mailer used by the carrier dispatcher and statutory demand letter generator to deliver formal ReportLab PDF demands.')
                 col_s1, col_s2 = st.columns(2)
                 with col_s1:
-                    s_host = st.text_input('SMTP Server Host', value=existing_settings.get('smtp_host', 'smtp.sendgrid.net'), key='cfg_smtp_host')
-                    s_port = st.text_input('SMTP Port', value=existing_settings.get('smtp_port', '587'), key='cfg_smtp_port')
-                    s_from = st.text_input('Legal Service Sender Email', value=existing_settings.get('smtp_from_email', 'legal@easyclaim.us'), key='cfg_smtp_from')
+                    s_host = st.text_input('SMTP Server Host', value=existing_settings.get('SMTP_HOST', existing_settings.get('smtp_host', 'smtp.gmail.com')), key='cfg_smtp_host')
+                    s_port = st.text_input('SMTP Port', value=existing_settings.get('SMTP_PORT', existing_settings.get('smtp_port', '587')), key='cfg_smtp_port')
+                    s_from = st.text_input('Legal Service Sender Email', value=existing_settings.get('FROM_EMAIL', existing_settings.get('smtp_from_email', 'claims@disputeagent.com')), key='cfg_smtp_from')
                 with col_s2:
-                    s_user = st.text_input('SMTP Username', value=existing_settings.get('smtp_username', 'apikey'), key='cfg_smtp_user')
-                    s_pass = st.text_input('SMTP Secret Key / Password', value=existing_settings.get('smtp_password', ''), type='password', key='cfg_smtp_pass')
+                    s_user = st.text_input('SMTP Username', value=existing_settings.get('SMTP_USER', existing_settings.get('smtp_username', '')), key='cfg_smtp_user')
+                    s_pass = st.text_input('SMTP Secret Key / Password', value=existing_settings.get('SMTP_PASS', existing_settings.get('smtp_password', '')), type='password', key='cfg_smtp_pass')
                 if st.button('💾 Save SMTP Gateway Settings', key='btn_save_smtp_cfg'):
                     conn = get_db()
                     with conn.cursor() as cur:
                         records = [
-                            ('smtp_host', s_host, 'smtp_gateway', 'Outbound legal SMTP server address'),
-                            ('smtp_port', s_port, 'smtp_gateway', 'Outbound legal SMTP port'),
-                            ('smtp_from_email', s_from, 'smtp_gateway', 'Official legal sender address'),
-                            ('smtp_username', s_user, 'smtp_gateway', 'SMTP relay user identifier'),
-                            ('smtp_password', s_pass, 'smtp_gateway', 'SMTP relay password')
+                            ('SMTP_HOST', s_host, 'smtp_gateway', 'Outbound legal SMTP server address'),
+                            ('SMTP_PORT', s_port, 'smtp_gateway', 'Outbound legal SMTP port'),
+                            ('FROM_EMAIL', s_from, 'smtp_gateway', 'Official legal sender address'),
+                            ('SMTP_USER', s_user, 'smtp_gateway', 'SMTP relay user identifier'),
+                            ('SMTP_PASS', s_pass, 'smtp_gateway', 'SMTP relay password')
                         ]
                         for k, v, cat, desc in records:
+                            stored_val = encrypt_value(v) if v else v
                             cur.execute("""
                                 INSERT INTO system_settings (key, value, category, description, updated_at)
                                 VALUES (%s, %s, %s, %s, NOW())
-                                ON CONFLICT (key) DO UPDATE 
+                                ON CONFLICT (key) DO UPDATE
                                 SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
-                            """, (k, v, cat, desc))
+                            """, (k, stored_val, cat, desc))
                     conn.close()
                     st.success('SMTP gateway settings saved to system_settings.')
                     st.rerun()
@@ -433,12 +449,13 @@ with st.sidebar:
                             ('TWILIO_PHONE_NUMBER', tw_phone, 'twilio', 'Outbound Twilio SMS sender number')
                         ]
                         for k, v, cat, desc in records:
+                            stored_val = encrypt_value(v) if v else v
                             cur.execute("""
                                 INSERT INTO system_settings (key, value, category, description, updated_at)
                                 VALUES (%s, %s, %s, %s, NOW())
                                 ON CONFLICT (key) DO UPDATE
                                 SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
-                            """, (k, v, cat, desc))
+                            """, (k, stored_val, cat, desc))
                     conn.close()
                     st.success('Twilio SMS credentials saved to system_settings.')
                     st.rerun()
@@ -458,14 +475,95 @@ with st.sidebar:
                             ('STRIPE_PUBLISHABLE_KEY', pay_publishable_key, 'stripe', 'Stripe publishable key for client-side checkout')
                         ]
                         for k, v, cat, desc in records:
+                            stored_val = encrypt_value(v) if v else v
                             cur.execute("""
                                 INSERT INTO system_settings (key, value, category, description, updated_at)
                                 VALUES (%s, %s, %s, %s, NOW())
                                 ON CONFLICT (key) DO UPDATE
                                 SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
-                            """, (k, v, cat, desc))
+                            """, (k, stored_val, cat, desc))
                     conn.close()
                     st.success('Stripe settlement credentials saved to system_settings.')
+                    st.rerun()
+            with tab_x:
+                st.markdown('#### X / Twitter API')
+                st.caption('Bearer token used by the Twitter/X scraper to discover public consumer-dispute posts.')
+                tw_bearer = st.text_input('Twitter Bearer Token', value=existing_settings.get('TWITTER_BEARER_TOKEN', ''), type='password', key='cfg_twitter_bearer')
+                if st.button('💾 Save Twitter/X Settings', key='btn_save_twitter_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        stored_val = encrypt_value(tw_bearer) if tw_bearer else tw_bearer
+                        cur.execute("""
+                            INSERT INTO system_settings (key, value, category, description, updated_at)
+                            VALUES (%s, %s, %s, %s, NOW())
+                            ON CONFLICT (key) DO UPDATE
+                            SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                        """, ('TWITTER_BEARER_TOKEN', stored_val, 'twitter', 'Bearer token for the X/Twitter API v2'))
+                    conn.close()
+                    st.success('Twitter/X settings saved to system_settings.')
+                    st.rerun()
+            with tab_rev:
+                st.markdown('#### Review Site Scraping')
+                st.caption('API key and list of review site URLs to monitor for consumer complaints.')
+                rev_api_key = st.text_input('Review Site API Key', value=existing_settings.get('REVIEW_SITE_API_KEY', ''), type='password', key='cfg_review_api_key')
+                rev_urls = st.text_area('Review Site URLs (JSON array of objects)', value=existing_settings.get('REVIEW_SITE_URLS', '[]'), height=100, key='cfg_review_urls')
+                if st.button('💾 Save Review Site Settings', key='btn_save_review_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        records = [
+                            ('REVIEW_SITE_API_KEY', rev_api_key, 'review_sites', 'API key for review site scraping'),
+                            ('REVIEW_SITE_URLS', rev_urls, 'review_sites', 'JSON array of review site URLs to monitor')
+                        ]
+                        for k, v, cat, desc in records:
+                            stored_val = encrypt_value(v) if v else v
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, description, updated_at)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE
+                                SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                            """, (k, stored_val, cat, desc))
+                    conn.close()
+                    st.success('Review site settings saved to system_settings.')
+                    st.rerun()
+            with tab_fl:
+                st.markdown('#### Flight Verification API')
+                st.caption('API key used to verify reported flight delays/cancellations against a live flight-status provider.')
+                fl_api_key = st.text_input('Flight Status API Key', value=existing_settings.get('FLIGHT_STATUS_API_KEY', ''), type='password', key='cfg_flight_api_key')
+                if st.button('💾 Save Flight Verification Settings', key='btn_save_flight_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        stored_val = encrypt_value(fl_api_key) if fl_api_key else fl_api_key
+                        cur.execute("""
+                            INSERT INTO system_settings (key, value, category, description, updated_at)
+                            VALUES (%s, %s, %s, %s, NOW())
+                            ON CONFLICT (key) DO UPDATE
+                            SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                        """, ('FLIGHT_STATUS_API_KEY', stored_val, 'flight_verification', 'API key for the flight status verification provider'))
+                    conn.close()
+                    st.success('Flight verification settings saved to system_settings.')
+                    st.rerun()
+            with tab_auto:
+                st.markdown('#### Auto-Approve Settings')
+                st.caption('Optionally auto-approve high-confidence outreach without manual review.')
+                auto_enabled = st.checkbox('Enable Auto-Approve', value=existing_settings.get('AUTO_APPROVE_ENABLED', 'false') == 'true', key='cfg_auto_approve_enabled')
+                auto_score = st.number_input('Auto-Approve Minimum Score', value=int(existing_settings.get('AUTO_APPROVE_MIN_SCORE', '75') or 75), min_value=0, max_value=100, key='cfg_auto_approve_score')
+                if st.button('💾 Save Auto-Approve Settings', key='btn_save_auto_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        records = [
+                            ('AUTO_APPROVE_ENABLED', str(auto_enabled).lower(), 'auto_approve', 'Whether high-confidence outreach is auto-approved'),
+                            ('AUTO_APPROVE_MIN_SCORE', str(auto_score), 'auto_approve', 'Minimum lead score required for auto-approval')
+                        ]
+                        for k, v, cat, desc in records:
+                            stored_val = encrypt_value(v) if v else v
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, description, updated_at)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE
+                                SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                            """, (k, stored_val, cat, desc))
+                    conn.close()
+                    st.success('Auto-approve settings saved to system_settings.')
                     st.rerun()
         except Exception as e:
             st.error(f'Error loading vendor configuration vault: {e}')
@@ -535,15 +633,55 @@ with st.sidebar:
         "📝 Direct Intake",
         "💬 Inquiries",
         "💼 Active Claims",
+        "🔎 Claim Timeline",
         "👤 Customer Interactions",
         "🏢 Vendor Communications",
         "📥 Webhook Audit",
         "⚠️ Dead-Letter Queue",
-        "📊 System Telemetry",
+        "🚨 Alerts",
+        "📤 Outreach Approval Queue",
+        "💰 Settlement Payouts",
+        "⏳ Stalled Claims",
+        "📊 Pipeline KPIs",
         "📖 Operations Manual",
         "⚙️ Super Admin"
     ]
 tabs = st.tabs(tab_titles)
+
+# --- GLOBAL SEARCH BAR ---
+st.markdown("#### 🔍 Global Claim Search")
+search_query = st.text_input("Search by name, email, phone, PNR, or claim ID...", placeholder="e.g., 'John Doe' or 'UA123' or '+14155551234'")
+
+if search_query:
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id::text, claimant_name, claimant_email, claimant_phone, pnr, carrier_name, status
+                FROM leads
+                WHERE claimant_name ILIKE %s OR claimant_email ILIKE %s OR claimant_phone ILIKE %s
+                   OR pnr ILIKE %s OR id::text ILIKE %s OR incident_identifier ILIKE %s
+                ORDER BY created_at DESC
+                LIMIT 20;
+            """, (f"%{search_query}%", f"%{search_query}%", f"%{search_query}%", f"%{search_query}%", f"%{search_query}%", f"%{search_query}%"))
+            results = cur.fetchall()
+        conn.close()
+
+        if results:
+            st.success(f"Found {len(results)} matching claim(s)")
+            for result in results:
+                col1, col2, col3 = st.columns([2, 1, 1])
+                col1.write(f"**{result['claimant_name']}** - {result['carrier_name']}")
+                col2.write(f"Status: {result['status']}")
+                if col3.button("View Timeline", key=f"timeline_{result['id']}"):
+                    st.session_state.selected_timeline_claim = result['id']
+                    st.rerun()
+        else:
+            st.info("No matching claims found.")
+    except Exception as e:
+        st.error(f"Search error: {e}")
+
+st.divider()
 
 # --- TAB 0: INGESTION QUEUE ---
 with tabs[0]:
@@ -1244,9 +1382,290 @@ with tabs[7]:
     except Exception as e:
         st.error(f"Error loading claim interaction viewer: {e}")
 
+# --- TAB 4: CLAIM TIMELINE ---
+with tabs[4]:
+    st.subheader("🔎 Claim Timeline: Full Life Story")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text, id, vertical, carrier_name, claimant_name FROM leads ORDER BY created_at DESC LIMIT 100;")
+            all_leads = cur.fetchall()
+        conn.close()
 
-# --- TAB 7: OPERATIONS MANUAL ---
-with tabs[7]:
+        if all_leads:
+            selected_lead_id = st.selectbox("Select Claim to View Timeline", [l["id"] for l in all_leads], format_func=lambda x: f"{next((l['carrier_name'] or l['vertical'] for l in all_leads if l['id'] == x), 'Unknown')} - {next((str(l['claimant_name'])[:30] for l in all_leads if l['id'] == x), 'Unknown')}")
+
+            conn = get_db()
+            with conn.cursor() as cur:
+                # Get lead details
+                cur.execute("SELECT * FROM leads WHERE id::text = %s;", (str(selected_lead_id),))
+                lead = cur.fetchone()
+
+                # Get status audit log
+                cur.execute("SELECT old_status, new_status, changed_by, note, changed_at FROM status_audit_log WHERE lead_id::text = %s ORDER BY changed_at ASC;", (str(selected_lead_id),))
+                audit_logs = cur.fetchall()
+
+                # Get carrier inbound events
+                cur.execute("SELECT event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events WHERE lead_id::text = %s ORDER BY created_at ASC;", (str(selected_lead_id),))
+                events = cur.fetchall()
+
+            conn.close()
+
+            if lead:
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Status", lead.get("status", "unknown").replace("_", " ").upper())
+                col2.metric("Carrier", lead.get("carrier_name", "N/A"))
+                col3.metric("Estimated Value", f"${float(lead.get('estimated_compensation', 0)):.2f}")
+
+                st.divider()
+                st.markdown("#### Timeline Events")
+
+                timeline_events = []
+                timeline_events.append({
+                    "time": lead.get("created_at"),
+                    "type": "LEAD_CREATED",
+                    "description": f"Claim detected via {lead.get('source_platform', 'unknown')}"
+                })
+
+                for log in audit_logs or []:
+                    timeline_events.append({
+                        "time": log.get("changed_at"),
+                        "type": f"STATUS_CHANGE",
+                        "description": f"{log.get('old_status', 'unknown')} → {log.get('new_status', 'unknown')} (by {log.get('changed_by', 'system')}): {log.get('note', '')}"
+                    })
+
+                for event in events or []:
+                    timeline_events.append({
+                        "time": event.get("created_at"),
+                        "type": "CARRIER_EVENT",
+                        "description": f"{event.get('event_type', 'unknown')}: {event.get('parsed_notes', '')} (Amount: ${float(event.get('settlement_amount', 0)):.2f})"
+                    })
+
+                timeline_events.sort(key=lambda x: x["time"] or "")
+
+                for event in timeline_events:
+                    with st.expander(f"{event['type']} - {event['time']}"):
+                        st.write(event['description'])
+        else:
+            st.info("No claims available.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# --- TAB 9: ALERTS ---
+with tabs[9]:
+    st.subheader("🚨 System Alerts")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id::text, lead_id::text, alert_type, message, created_at, acknowledged
+                FROM system_alerts
+                WHERE acknowledged = FALSE
+                ORDER BY created_at DESC
+                LIMIT 100;
+            """)
+            alerts = cur.fetchall()
+        conn.close()
+
+        if alerts:
+            for alert in alerts:
+                with st.expander(f"{alert['alert_type'].upper()} - {alert['created_at']}", expanded=True):
+                    st.write(alert['message'])
+                    if st.button("Acknowledge", key=f"ack_{alert['id']}"):
+                        conn = get_db()
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                UPDATE system_alerts
+                                SET acknowledged = TRUE, acknowledged_by = %s, acknowledged_at = NOW()
+                                WHERE id::text = %s;
+                            """, (user_info.get("username"), alert['id']))
+                        conn.close()
+                        st.success("Alert acknowledged.")
+                        st.rerun()
+        else:
+            st.info("No unacknowledged alerts.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# --- TAB 10: OUTREACH APPROVAL QUEUE ---
+with tabs[10]:
+    st.subheader("📤 Outreach Approval Queue")
+    st.info("Review and approve all outbound SMS/DM messages before they are sent to claimants.")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id::text, lead_id::text, channel, recipient, message_body, created_at
+                FROM outreach_queue
+                WHERE status = 'pending_approval'
+                ORDER BY created_at ASC;
+            """)
+            pending = cur.fetchall()
+        conn.close()
+
+        if pending:
+            for msg in pending:
+                with st.expander(f"{msg['channel'].upper()} to {msg['recipient']} ({msg['created_at']})", expanded=True):
+                    st.text_area("Message Body", value=msg['message_body'], disabled=True, height=100)
+
+                    col1, col2 = st.columns(2)
+                    if col1.button("✅ Approve & Send", key=f"send_{msg['id']}"):
+                        from outreach_gateway import dispatch_approved_outreach
+                        ok, note = dispatch_approved_outreach(msg['id'], user_info.get("username"))
+                        if ok:
+                            st.success(f"✅ Sent to {msg['recipient']}: {note}")
+                        else:
+                            st.error(f"❌ Send failed: {note}")
+                        st.rerun()
+
+                    if col2.button("❌ Reject", key=f"reject_{msg['id']}"):
+                        from outreach_gateway import reject_outreach
+                        reject_outreach(msg['id'], user_info.get("username"), reason="Rejected by admin in Outreach Approval Queue.")
+                        st.success("Message rejected. Lead reverted to 'approved' for review/edit.")
+                        st.rerun()
+        else:
+            st.info("No pending outreach messages.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# --- TAB 11: SETTLEMENT PAYOUTS ---
+with tabs[11]:
+    st.subheader("💰 Settlement Payouts")
+    st.warning("⚠️ PAYMENT AUTHORIZATION - Confirm carefully before processing.")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id::text, claimant_name, claimant_email, carrier_name, recovery_amount, fee_collected
+                FROM leads
+                WHERE status = 'settled'
+                ORDER BY updated_at DESC
+                LIMIT 50;
+            """)
+            settled = cur.fetchall()
+        conn.close()
+
+        if settled:
+            for lead in settled:
+                net = float(lead['recovery_amount'] or 0) - float(lead['fee_collected'] or 0)
+                with st.expander(f"{lead['claimant_name']} - ${float(lead['recovery_amount']):.2f} from {lead['carrier_name']}", expanded=False):
+                    st.metric("Net to Claimant", f"${net:.2f}")
+                    st.caption(f"Email: {lead['claimant_email']}")
+
+                    if st.button("💳 Confirm & Pay", key=f"pay_{lead['id']}"):
+                        from payout_processor import execute_payout
+                        success, msg = execute_payout(lead['id'], user_info.get("username"))
+                        if success:
+                            st.success(f"✅ Payout initiated: {msg}")
+                        else:
+                            st.error(f"❌ Payout failed: {msg}")
+        else:
+            st.info("No settled claims pending payout.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# --- TAB 12: STALLED CLAIMS ---
+with tabs[12]:
+    st.subheader("⏳ Stalled Claims")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            # Get default stalled threshold from settings, default 10 days
+            cur.execute("SELECT value FROM system_settings WHERE key = 'STALLED_DAYS_THRESHOLD';")
+            res = cur.fetchone()
+            threshold = int(res['value']) if res and res['value'] else 10
+
+        stalled_days = st.number_input("Stalled threshold (days)", value=threshold, min_value=1)
+
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT id::text, vertical, carrier_name, claimant_name, status, last_status_change_at,
+                       EXTRACT(DAY FROM NOW() - last_status_change_at) as days_stalled
+                FROM leads
+                WHERE status NOT IN ('settled', 'rejected')
+                AND EXTRACT(DAY FROM NOW() - last_status_change_at) >= %s
+                ORDER BY last_status_change_at ASC;
+            """, (stalled_days,))
+            stalled = cur.fetchall()
+        conn.close()
+
+        if stalled:
+            df_stalled = pd.DataFrame(stalled)
+            st.dataframe(df_stalled[["carrier_name", "claimant_name", "status", "days_stalled"]])
+            st.caption(f"{len(stalled)} claims stalled for {stalled_days}+ days")
+        else:
+            st.success(f"✅ No stalled claims (threshold: {stalled_days} days)")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# --- TAB 13: PIPELINE KPIs ---
+with tabs[13]:
+    st.subheader("📊 Pipeline KPIs")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            # Conversion funnel
+            cur.execute("""
+                SELECT status, COUNT(*) as count
+                FROM leads
+                GROUP BY status
+                ORDER BY count DESC;
+            """)
+            status_counts = cur.fetchall()
+
+            # Time to settlement
+            cur.execute("""
+                SELECT AVG(EXTRACT(DAY FROM updated_at - created_at)) as avg_days
+                FROM leads
+                WHERE status = 'settled';
+            """)
+            avg_settlement_time = cur.fetchone()
+
+            # Response rate by carrier
+            cur.execute("""
+                SELECT carrier_name,
+                       COUNT(*) as total_dispatched,
+                       SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) as settled,
+                       ROUND(100.0 * SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END) / COUNT(*), 1) as response_rate
+                FROM leads
+                WHERE status IN ('dispatched', 'settled')
+                GROUP BY carrier_name
+                ORDER BY response_rate DESC;
+            """)
+            carrier_stats = cur.fetchall()
+
+        conn.close()
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("#### Conversion Funnel")
+            if status_counts:
+                df_funnel = pd.DataFrame(status_counts)
+                st.bar_chart(df_funnel.set_index('status')['count'])
+
+        with col2:
+            st.markdown("#### Performance Metrics")
+            if avg_settlement_time and avg_settlement_time['avg_days']:
+                st.metric("Avg Time to Settlement", f"{avg_settlement_time['avg_days']:.1f} days")
+
+            total_leads = sum(c['count'] for c in status_counts)
+            settled_leads = next((c['count'] for c in status_counts if c['status'] == 'settled'), 0)
+            st.metric("Overall Settlement Rate", f"{100.0 * settled_leads / total_leads:.1f}%" if total_leads > 0 else "N/A")
+
+        st.divider()
+        st.markdown("#### Carrier Response Rates")
+        if carrier_stats:
+            df_carriers = pd.DataFrame(carrier_stats)
+            st.dataframe(df_carriers[["carrier_name", "settled", "total_dispatched", "response_rate"]])
+        else:
+            st.info("No carrier dispatch data yet.")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# --- TAB 14: OPERATIONS MANUAL ---
+with tabs[14]:
     st.header("📖 Dispute Agent Platform: Complete Operations Manual")
     st.caption("Standard Operating Procedures, Claim Lifecycle Guidelines, and Troubleshooting Reference.")
 
@@ -1368,9 +1787,9 @@ with tabs[7]:
           * Assign roles based on access needs: `claims_agent` (review only), `claims_manager` (review + DLQ actions), `auditor` (read-only), or `super_admin` (full system access).
         """)
 
-# --- TAB 8: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
-if user_role == "super_admin" and len(tabs) > 8:
-    with tabs[8]:
+# --- TAB 15: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
+if user_role == "super_admin" and len(tabs) > 15:
+    with tabs[15]:
         st.subheader("👥 User Management & Role Provisioning")
         col_new_user, col_user_list = st.columns([1, 1.4])
 

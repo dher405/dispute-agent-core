@@ -41,6 +41,22 @@ def run_retry_cycle():
                     nxt = datetime.utcnow() + timedelta(minutes=2 ** attempts)
                     st = "dispatch_failed" if attempts >= 5 else lead["status"]
                     cur.execute("UPDATE leads SET status=%s, dispatch_attempts=%s, last_dispatch_error=%s, next_dispatch_retry_at=%s, updated_at=NOW() WHERE id::text=%s;", (st, attempts, note, nxt, lead_id))
+
+                    # Item 10: dead-letter-queue exhaustion -- once retries are exhausted the
+                    # lead will never be picked up by this cycle's WHERE clause again
+                    # (dispatch_attempts < 5), so raise a system_alerts row for human follow-up.
+                    if attempts >= 5:
+                        cur.execute("""
+                            INSERT INTO system_alerts (lead_id, alert_type, message, created_at)
+                            VALUES (%s, %s, %s, NOW())
+                        """, (
+                            lead_id,
+                            "dispatch_dlq_exhausted",
+                            f"Lead {lead_id} ({lead.get('carrier_name')}) failed demand-letter dispatch "
+                            f"{attempts} times and has been moved to dispatch_failed. Last error: {note}. "
+                            f"Manual dispatch required."
+                        ))
+                        logger.warning(f"Lead {lead_id} exhausted dispatch retries; alert raised for manual follow-up.")
                 conn.commit()
     finally:
         conn.close()

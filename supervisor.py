@@ -8,7 +8,12 @@ logger = logging.getLogger("Supervisor")
 
 WORKERS = [
     {"name": "Reddit Ingestion", "cmd": [sys.executable, "worker.py"]},
-    {"name": "Bluesky Ingestion", "cmd": [sys.executable, "worker_bluesky.py"]}
+    {"name": "Bluesky Ingestion", "cmd": [sys.executable, "worker_bluesky.py"]},
+    {"name": "Twitter Ingestion", "cmd": [sys.executable, "twitter_scraper.py"]},
+    {"name": "Review Site Scraper", "cmd": [sys.executable, "review_scraper.py"]},
+    {"name": "Reddit Reply Listener", "cmd": [sys.executable, "reddit_reply_listener.py"]},
+    {"name": "Escalation Worker", "cmd": [sys.executable, "escalation_worker.py"]},
+    {"name": "Carrier Retry Worker", "cmd": [sys.executable, "carrier_retry_worker.py"]}
 ]
 
 def run_all_once():

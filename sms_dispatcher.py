@@ -4,6 +4,7 @@ from typing import Dict, Any, Tuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from crypto import decrypt_value
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ def get_setting(key: str, default: str = "") -> str:
             res = cur.fetchone()
         conn.close()
         if res and res.get("value"):
-            return res["value"].strip()
+            return decrypt_value(res["value"].strip())
     except Exception:
         pass
     return os.getenv(key, default)
@@ -49,6 +50,13 @@ def send_sms(to_phone: str, body: str) -> Tuple[bool, str]:
         return False, str(e)
 
 def notify_claim_event(lead_id: str, event_type: str) -> bool:
+    """
+    Item 16 (mandatory human-in-the-loop gate): this NO LONGER sends SMS directly.
+    It composes the message and hands it to outreach_gateway.enqueue_outreach(), which
+    only writes a 'pending_approval' row to outreach_queue. A human admin must click
+    "Approve & Send" in the app.py Outreach Approval Queue tab before this message is
+    actually transmitted via Twilio.
+    """
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -80,8 +88,10 @@ def notify_claim_event(lead_id: str, event_type: str) -> bool:
         else:
             body = f"Dispute Agent: Status update on claim {lead_id}: {tracking_url}"
 
-        success, _ = send_sms(phone, body)
-        return success
+        from outreach_gateway import enqueue_outreach
+        enqueue_outreach(lead_id, "sms", phone, body)
+        logger.info(f"[SMS QUEUED FOR APPROVAL] lead={lead_id} event={event_type} -- awaiting human approval, not yet sent.")
+        return True
     except Exception as e:
-        logger.error(f"Error notifying claim event: {e}")
+        logger.error(f"Error queuing claim event notification: {e}")
         return False

@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, Tuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from crypto import decrypt_value
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ def get_setting(key: str, default: str = "") -> str:
             res = cur.fetchone()
         conn.close()
         if res and res.get("value"):
-            return res["value"].strip()
+            return decrypt_value(res["value"].strip())
     except Exception:
         pass
     return os.getenv(key, default)
