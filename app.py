@@ -660,8 +660,7 @@ with tabs[2]:
     except Exception as e:
         st.error(f"Error loading customer inquiries: {e}")
 
-# --- TAB 3: ACTIVE CLAIMS
-# --- TAB 3: ACTIVE CLAIMS (ENHANCED QUEUE & OUTREACH AUDIT) ---
+# --- TAB 3: ACTIVE CLAIMS (ENHANCED QUEUE, ARCHIVE & OUTREACH AUDIT) ---
 with tabs[3]:
     st.subheader("💼 Active Claims & Outreach Tracking Ledger")
     st.caption("Track pipeline progress from queue and contact through formal dispatch and final settlement. Archive settled or unresponded claims to declutter this view.")
@@ -807,13 +806,14 @@ with tabs[3]:
             with col_detail_r:
                 st.markdown("#### Message Contents & Outreach Verbiage")
 
-                if c_status == "approved":
+                data_status = c_status
+                if data_status == "approved":
                     st.warning("⏳ **Status: Queued for Outreach.** This message is scheduled for delivery to the recipient above.")
-                elif c_status == "contacted":
+                elif data_status == "contacted":
                     st.info("📨 **Status: Contacted.** Message delivered to target discussion/inbox. Awaiting claimant e-signature.")
-                elif c_status in ("opted_in", "dispatched"):
+                elif data_status in ("opted_in", "dispatched"):
                     st.success("✅ **Status: Authorized & Dispatched.** Client completed intake. Formal statutory demand served.")
-                elif c_status == "settled":
+                elif data_status == "settled":
                     rec = float(selected_claim.get("recovery_amount") or 0.0)
                     fee = float(selected_claim.get("fee_collected") or (rec * 0.25))
                     st.success(f"🎉 **Status: Settled.** Recovered: **${rec:.2f}** | Platform 25% Contingency Fee: **${fee:.2f}**")
@@ -828,7 +828,7 @@ with tabs[3]:
 
                 col_act1, col_act2 = st.columns(2)
                 with col_act1:
-                    if c_status == "approved":
+                    if data_status == "approved":
                         if st.button("🚀 Mark as Contacted (Confirm Dispatch)", key=f"mark_contacted_{sel_claim_id}"):
                             conn = get_db()
                             with conn.cursor() as cur:
