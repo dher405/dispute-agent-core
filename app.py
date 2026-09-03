@@ -628,25 +628,40 @@ with st.sidebar:
         st.session_state.user_info = None
         st.rerun()
 
-    tab_titles = [
-        "📥 Ingestion Queue",
-        "📝 Direct Intake",
-        "💬 Inquiries",
-        "💼 Active Claims",
-        "🔎 Claim Timeline",
-        "👤 Customer Interactions",
-        "🏢 Vendor Communications",
-        "📥 Webhook Audit",
-        "⚠️ Dead-Letter Queue",
-        "🚨 Alerts",
-        "📤 Outreach Approval Queue",
-        "💰 Settlement Payouts",
-        "⏳ Stalled Claims",
-        "📊 Pipeline KPIs",
-        "📖 Operations Manual",
-        "⚙️ Super Admin"
-    ]
-tabs = st.tabs(tab_titles)
+
+
+    st.divider()
+    st.markdown("### 🧭 Navigate")
+
+    # NOTE: navigation was rebuilt as a two-level sidebar (section -> page) to
+    # replace the old flat st.tabs() layout, and each page below is rendered
+    # by matching on its exact label rather than a numeric tab index. The old
+    # index-based tabs had drifted out of sync with their labels over time
+    # (e.g. the tab labeled "Dead-Letter Queue" was actually showing System
+    # Telemetry content) -- matching by label instead of position eliminates
+    # that whole class of mismatch going forward.
+    nav_structure = {
+        "🏠 Dashboard": ["🏠 Overview"],
+        "📋 Leads & Intake": ["📥 Ingestion Queue", "📝 Direct Intake", "💬 Customer Inquiries"],
+        "💼 Claims & Customers": ["💼 Active Claims", "🔎 Claim Timeline", "👤 Customer Details", "🏢 Vendor Communications", "🕵️ Full Claim Audit"],
+        "📤 Outreach & Payouts": ["📤 Outreach Approval", "💰 Settlement Payouts"],
+        "🚨 Monitoring & Alerts": ["🚨 System Alerts", "⚠️ Dead-Letter Queue", "⏳ Stalled Claims", "📊 Performance Reports", "📥 Webhook Audit", "📋 System Logs"],
+        "⚙️ Admin": ["📖 Help & User Guide"] + (["👥 User Management"] if user_role == "super_admin" else []),
+    }
+
+    nav_group_names = list(nav_structure.keys())
+    selected_group = st.radio("Section", nav_group_names, key="nav_group", label_visibility="collapsed")
+
+    pages_in_group = nav_structure[selected_group]
+    if len(pages_in_group) > 1:
+        selected_page = st.radio("Page", pages_in_group, key=f"nav_page__{selected_group}", label_visibility="collapsed")
+    else:
+        selected_page = pages_in_group[0]
+
+
+# --- PAGE HEADER ---
+st.title(selected_page)
+st.caption(f"{selected_group}")
 
 # --- GLOBAL SEARCH BAR ---
 st.markdown("#### 🔍 Global Claim Search")
@@ -683,8 +698,102 @@ if search_query:
 
 st.divider()
 
-# --- TAB 0: INGESTION QUEUE ---
-with tabs[0]:
+if selected_page == "🏠 Overview":
+    st.caption("A quick snapshot of what needs attention right now, and where things stand across the pipeline.")
+
+    def _jump(group, page):
+        st.session_state["nav_group"] = group
+        st.session_state[f"nav_page__{group}"] = page
+        st.rerun()
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM leads WHERE status = 'staged_for_review';")
+            staged_count = cur.fetchone()["c"]
+
+            cur.execute("SELECT COUNT(*) AS c FROM leads WHERE status IN ('approved', 'contacted', 'opted_in', 'dispatched');")
+            active_count = cur.fetchone()["c"]
+
+            cur.execute("SELECT COUNT(*) AS c FROM outreach_queue WHERE status = 'pending_approval';")
+            pending_outreach_count = cur.fetchone()["c"]
+
+            cur.execute("SELECT COUNT(*) AS c FROM leads WHERE status = 'dispatch_failed';")
+            dlq_count = cur.fetchone()["c"]
+
+            cur.execute("SELECT COUNT(*) AS c FROM system_alerts WHERE acknowledged = FALSE;")
+            unack_alerts_count = cur.fetchone()["c"]
+
+            cur.execute("SELECT COALESCE(SUM(recovery_amount), 0) AS rec, COALESCE(SUM(fee_collected), 0) AS fee FROM leads WHERE status = 'settled';")
+            totals = cur.fetchone()
+
+            cur.execute("""
+                SELECT id::text, alert_type, message, created_at
+                FROM system_alerts
+                WHERE acknowledged = FALSE
+                ORDER BY created_at DESC
+                LIMIT 5;
+            """)
+            recent_alerts = cur.fetchall()
+
+            cur.execute("""
+                SELECT id::text, channel, recipient, created_at
+                FROM outreach_queue
+                WHERE status = 'pending_approval'
+                ORDER BY created_at ASC
+                LIMIT 5;
+            """)
+            recent_pending_outreach = cur.fetchall()
+        conn.close()
+
+        st.markdown("#### Pipeline Snapshot")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Awaiting Review", staged_count)
+        m2.metric("Active Claims", active_count)
+        m3.metric("Pending Outreach Approval", pending_outreach_count)
+        m4.metric("Dead-Letter Queue", dlq_count)
+        m5.metric("Unacknowledged Alerts", unack_alerts_count)
+
+        f1, f2 = st.columns(2)
+        f1.metric("Total Recovered for Clients", f"${float(totals['rec']):.2f}")
+        f2.metric("Platform Fees Collected (25%)", f"${float(totals['fee']):.2f}")
+
+        st.divider()
+        st.markdown("#### 🔔 Needs Your Attention")
+
+        if not (recent_alerts or recent_pending_outreach or dlq_count):
+            st.success("✅ Nothing urgent right now — the queue is clear.")
+
+        if recent_alerts:
+            st.markdown(f"**{len(recent_alerts)} recent unacknowledged alert(s):**")
+            for a in recent_alerts:
+                st.write(f"- `{a['alert_type']}` — {a['message']} ({a['created_at']})")
+            if st.button("Go to System Alerts →", key="dash_jump_alerts"):
+                _jump("🚨 Monitoring & Alerts", "🚨 System Alerts")
+
+        if recent_pending_outreach:
+            st.markdown(f"**{len(recent_pending_outreach)} outreach message(s) waiting for your approval before they're sent:**")
+            for o in recent_pending_outreach:
+                st.write(f"- {o['channel'].upper()} to {o['recipient']} (queued {o['created_at']})")
+            if st.button("Go to Outreach Approval →", key="dash_jump_outreach"):
+                _jump("📤 Outreach & Payouts", "📤 Outreach Approval")
+
+        if dlq_count:
+            st.markdown(f"**{dlq_count} claim(s) stuck in the Dead-Letter Queue** after repeated failed dispatch attempts.")
+            if st.button("Go to Dead-Letter Queue →", key="dash_jump_dlq"):
+                _jump("🚨 Monitoring & Alerts", "⚠️ Dead-Letter Queue")
+
+        if staged_count:
+            st.divider()
+            st.markdown(f"**{staged_count} new lead(s)** are waiting in the Ingestion Queue for your review.")
+            if st.button("Go to Ingestion Queue →", key="dash_jump_ingestion"):
+                _jump("📋 Leads & Intake", "📥 Ingestion Queue")
+
+    except Exception as e:
+        st.error(f"Error loading dashboard: {e}")
+
+
+if selected_page == "📥 Ingestion Queue":
     st.subheader("Staged Consumer Signals")
     vertical_filter = st.selectbox(
         "Filter by Vertical",
@@ -773,8 +882,8 @@ with tabs[0]:
     except Exception as e:
         st.error(f"Error loading review queue: {e}")
 
-# --- TAB 1: DIRECT MANUAL INTAKE ---
-with tabs[1]:
+
+if selected_page == "📝 Direct Intake":
     st.subheader("✍️ Direct Manual Claim Ingestion & Scenario Builder")
     st.caption("Create a dispute scenario when a consumer contacts you directly via email, phone, or referral.")
 
@@ -918,8 +1027,8 @@ with tabs[1]:
                     except Exception as e:
                         st.error(f"Database insertion failed: {e}")
 
-# --- TAB 2: CUSTOMER INQUIRIES ---
-with tabs[2]:
+
+if selected_page == "💬 Customer Inquiries":
     st.subheader("💬 Inbound Contact Messages & Inquiries")
     st.caption("Messages submitted through the public EasyClaim contact form.")
     try:
@@ -955,8 +1064,8 @@ with tabs[2]:
     except Exception as e:
         st.error(f"Error loading customer inquiries: {e}")
 
-# --- TAB 3: ACTIVE CLAIMS (ENHANCED QUEUE & ARCHIVE) ---
-with tabs[3]:
+
+if selected_page == "💼 Active Claims":
     st.subheader("💼 Active Claims & Outreach Tracking Ledger")
     st.caption("Track pipeline progress from queue and contact through formal dispatch and final settlement. Archive settled or unresponded claims to declutter this view.")
 
@@ -1069,8 +1178,77 @@ with tabs[3]:
     except Exception as e:
         st.error(f"Error loading active claims ledger: {e}")
 
-# --- TAB 4: CUSTOMER INTERACTIONS BY CLAIM ID ---
-with tabs[4]:
+
+if selected_page == "🔎 Claim Timeline":
+    st.subheader("🔎 Claim Timeline: Full Life Story")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text, id, vertical, carrier_name, claimant_name FROM leads ORDER BY created_at DESC LIMIT 100;")
+            all_leads = cur.fetchall()
+        conn.close()
+
+        if all_leads:
+            selected_lead_id = st.selectbox("Select Claim to View Timeline", [l["id"] for l in all_leads], format_func=lambda x: f"{next((l['carrier_name'] or l['vertical'] for l in all_leads if l['id'] == x), 'Unknown')} - {next((str(l['claimant_name'])[:30] for l in all_leads if l['id'] == x), 'Unknown')}")
+
+            conn = get_db()
+            with conn.cursor() as cur:
+                # Get lead details
+                cur.execute("SELECT * FROM leads WHERE id::text = %s;", (str(selected_lead_id),))
+                lead = cur.fetchone()
+
+                # Get status audit log
+                cur.execute("SELECT old_status, new_status, changed_by, note, changed_at FROM status_audit_log WHERE lead_id::text = %s ORDER BY changed_at ASC;", (str(selected_lead_id),))
+                audit_logs = cur.fetchall()
+
+                # Get carrier inbound events
+                cur.execute("SELECT event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events WHERE lead_id::text = %s ORDER BY created_at ASC;", (str(selected_lead_id),))
+                events = cur.fetchall()
+
+            conn.close()
+
+            if lead:
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Status", lead.get("status", "unknown").replace("_", " ").upper())
+                col2.metric("Carrier", lead.get("carrier_name", "N/A"))
+                col3.metric("Estimated Value", f"${float(lead.get('estimated_compensation', 0)):.2f}")
+
+                st.divider()
+                st.markdown("#### Timeline Events")
+
+                timeline_events = []
+                timeline_events.append({
+                    "time": lead.get("created_at"),
+                    "type": "LEAD_CREATED",
+                    "description": f"Claim detected via {lead.get('source_platform', 'unknown')}"
+                })
+
+                for log in audit_logs or []:
+                    timeline_events.append({
+                        "time": log.get("changed_at"),
+                        "type": f"STATUS_CHANGE",
+                        "description": f"{log.get('old_status', 'unknown')} → {log.get('new_status', 'unknown')} (by {log.get('changed_by', 'system')}): {log.get('note', '')}"
+                    })
+
+                for event in events or []:
+                    timeline_events.append({
+                        "time": event.get("created_at"),
+                        "type": "CARRIER_EVENT",
+                        "description": f"{event.get('event_type', 'unknown')}: {event.get('parsed_notes', '')} (Amount: ${float(event.get('settlement_amount', 0)):.2f})"
+                    })
+
+                timeline_events.sort(key=lambda x: x["time"] or "")
+
+                for event in timeline_events:
+                    with st.expander(f"{event['type']} - {event['time']}"):
+                        st.write(event['description'])
+        else:
+            st.info("No claims available.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+
+if selected_page == "👤 Customer Details":
     st.subheader("👤 Customer Correspondence & Verification Audit")
     st.caption("Inspect passenger onboarding data, signed authorizations, PNR references, and consumer outreach by Claim ID.")
 
@@ -1124,8 +1302,8 @@ with tabs[4]:
     except Exception as e:
         st.error(f"Error loading customer interactions: {e}")
 
-# --- TAB 5: VENDOR COMMUNICATIONS & DEMAND LETTERS ---
-with tabs[5]:
+
+if selected_page == "🏢 Vendor Communications":
     st.subheader("🏢 Vendor Demand Letters & Carrier Interaction Ledger")
     st.caption("Audit where and how statutory legal demands were served to carriers and inspect inbound vendor responses.")
 
@@ -1202,103 +1380,8 @@ with tabs[5]:
     except Exception as e:
         st.error(f"Error loading vendor communications: {e}")
 
-# --- TAB 6: WEBHOOK AUDIT ---
-with tabs[6]:
-    st.subheader("📥 Inbound Carrier Webhook Audit")
-    st.caption("Inspect raw webhook payloads received from carriers regarding settlements and dispute updates.")
 
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id::text AS id, lead_id::text AS lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 100;")
-            events = cur.fetchall()
-        conn.close()
-
-        if events:
-            df_events = pd.DataFrame(events)
-            st.dataframe(df_events[["id", "carrier_name", "vertical", "event_type", "settlement_amount", "created_at"]], use_container_width=True)
-        else:
-            st.info("No inbound webhook events recorded yet.")
-    except Exception as e:
-        st.error(f"Error loading webhook audit: {e}")
-
-# --- TAB 7: DEAD-LETTER QUEUE (DLQ) ---
-with tabs[7]:
-    st.subheader("⚠️ Dead-Letter Queue (DLQ) & Dispatch Failures")
-    st.caption("Review leads where outbound dispatch failed repeatedly and trigger manual retries.")
-
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT id::text AS id, vertical, carrier_name, claimant_email, dispatch_attempts, last_dispatch_error, last_dispatch_attempt_at FROM leads WHERE status = 'dispatch_failed' ORDER BY last_dispatch_attempt_at DESC;")
-            dlq_leads = cur.fetchall()
-        conn.close()
-
-        if dlq_leads:
-            df_dlq = pd.DataFrame(dlq_leads)
-            st.dataframe(df_dlq, use_container_width=True)
-        else:
-            st.info("Dead-letter queue is clear. No failed dispatches found.")
-    except Exception as e:
-        st.error(f"Error loading DLQ: {e}")
-
-# --- TAB 8: SYSTEM TELEMETRY & HISTORICAL AUDIT LOGS (FULL SEARCH) ---
-with tabs[8]:
-    st.subheader("📊 System Telemetry & Historical Audit Logs")
-    st.caption("Search across the entire history of system telemetry, worker executions, email dispatches, and errors.")
-
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        log_level_filter = st.selectbox("Filter Log Level", ["All Levels", "INFO", "WARNING", "ERROR", "CRITICAL"], key="telemetry_level_filter")
-    with col_s2:
-        date_start = st.date_input("Start Date", value=None, key="telemetry_start_date")
-    with col_s3:
-        date_end = st.date_input("End Date", value=None, key="telemetry_end_date")
-
-    search_keyword = st.text_input("🔍 Full-Text Search Logs (Message, Service, Lead ID, or Keyword)", key="telemetry_keyword_search")
-
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            sql = "SELECT id::text AS id, service_name, event_category, log_level, message, lead_id::text AS lead_id, metadata, created_at FROM system_audit_logs WHERE 1=1"
-            sql_params = []
-            if log_level_filter != "All Levels":
-                sql += " AND log_level = %s"
-                sql_params.append(log_level_filter)
-            if date_start:
-                sql += " AND created_at::date >= %s"
-                sql_params.append(date_start)
-            if date_end:
-                sql += " AND created_at::date <= %s"
-                sql_params.append(date_end)
-            if search_keyword:
-                sql += " AND (message ILIKE %s OR service_name ILIKE %s OR lead_id::text ILIKE %s OR metadata::text ILIKE %s)"
-                kw = f"%{search_keyword}%"
-                sql_params.extend([kw, kw, kw, kw])
-
-            sql += " ORDER BY created_at DESC LIMIT 5000;"
-            cur.execute(sql, tuple(sql_params))
-            found_logs = cur.fetchall()
-        conn.close()
-
-        if found_logs:
-            df_fl = pd.DataFrame(found_logs)
-            st.metric("Total Logs Matching Query", len(df_fl))
-            st.dataframe(df_fl[["created_at", "service_name", "event_category", "log_level", "message", "lead_id"]], use_container_width=True)
-
-            sel_lid = st.selectbox("Inspect Full Metadata for Log ID", df_fl["id"].tolist(), key="sel_log_meta_id")
-            selected_l = df_fl[df_fl["id"] == sel_lid].iloc[0]
-            st.markdown(f"**Service:** `{selected_l['service_name']}` | **Category:** `{selected_l['event_category']}` | **Level:** `{selected_l['log_level']}`")
-            st.markdown(f"**Message:** {selected_l['message']}")
-            st.json(selected_l["metadata"] or {})
-        else:
-            st.info("No logs found matching search criteria.")
-    except Exception as e:
-        st.error(f"Error querying telemetry logs: {e}")
-
-
-# --- TAB 7: CLAIM-SPECIFIC INTERACTION & AUDIT VIEWER (NEW) ---
-with tabs[7]:
+if selected_page == "🕵️ Full Claim Audit":
     st.subheader("🕵️ Claim-Specific Interaction & Communications Audit")
     st.caption("Decipher and inspect all customer correspondence, vendor demand letters, transmission receipts, and billing/recovery logs by Claim ID.")
 
@@ -1382,77 +1465,85 @@ with tabs[7]:
     except Exception as e:
         st.error(f"Error loading claim interaction viewer: {e}")
 
-# --- TAB 4: CLAIM TIMELINE ---
-with tabs[4]:
-    st.subheader("🔎 Claim Timeline: Full Life Story")
+
+if selected_page == "📤 Outreach Approval":
+    st.subheader("📤 Outreach Approval Queue")
+    st.info("Review and approve all outbound SMS/DM messages before they are sent to claimants.")
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("SELECT id::text, id, vertical, carrier_name, claimant_name FROM leads ORDER BY created_at DESC LIMIT 100;")
-            all_leads = cur.fetchall()
+            cur.execute("""
+                SELECT id::text, lead_id::text, channel, recipient, message_body, created_at
+                FROM outreach_queue
+                WHERE status = 'pending_approval'
+                ORDER BY created_at ASC;
+            """)
+            pending = cur.fetchall()
         conn.close()
 
-        if all_leads:
-            selected_lead_id = st.selectbox("Select Claim to View Timeline", [l["id"] for l in all_leads], format_func=lambda x: f"{next((l['carrier_name'] or l['vertical'] for l in all_leads if l['id'] == x), 'Unknown')} - {next((str(l['claimant_name'])[:30] for l in all_leads if l['id'] == x), 'Unknown')}")
+        if pending:
+            for msg in pending:
+                with st.expander(f"{msg['channel'].upper()} to {msg['recipient']} ({msg['created_at']})", expanded=True):
+                    st.text_area("Message Body", value=msg['message_body'], disabled=True, height=100)
 
-            conn = get_db()
-            with conn.cursor() as cur:
-                # Get lead details
-                cur.execute("SELECT * FROM leads WHERE id::text = %s;", (str(selected_lead_id),))
-                lead = cur.fetchone()
+                    col1, col2 = st.columns(2)
+                    if col1.button("✅ Approve & Send", key=f"send_{msg['id']}"):
+                        from outreach_gateway import dispatch_approved_outreach
+                        ok, note = dispatch_approved_outreach(msg['id'], current_user.get("username"))
+                        if ok:
+                            st.success(f"✅ Sent to {msg['recipient']}: {note}")
+                        else:
+                            st.error(f"❌ Send failed: {note}")
+                        st.rerun()
 
-                # Get status audit log
-                cur.execute("SELECT old_status, new_status, changed_by, note, changed_at FROM status_audit_log WHERE lead_id::text = %s ORDER BY changed_at ASC;", (str(selected_lead_id),))
-                audit_logs = cur.fetchall()
-
-                # Get carrier inbound events
-                cur.execute("SELECT event_type, settlement_amount, parsed_notes, created_at FROM carrier_inbound_events WHERE lead_id::text = %s ORDER BY created_at ASC;", (str(selected_lead_id),))
-                events = cur.fetchall()
-
-            conn.close()
-
-            if lead:
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Status", lead.get("status", "unknown").replace("_", " ").upper())
-                col2.metric("Carrier", lead.get("carrier_name", "N/A"))
-                col3.metric("Estimated Value", f"${float(lead.get('estimated_compensation', 0)):.2f}")
-
-                st.divider()
-                st.markdown("#### Timeline Events")
-
-                timeline_events = []
-                timeline_events.append({
-                    "time": lead.get("created_at"),
-                    "type": "LEAD_CREATED",
-                    "description": f"Claim detected via {lead.get('source_platform', 'unknown')}"
-                })
-
-                for log in audit_logs or []:
-                    timeline_events.append({
-                        "time": log.get("changed_at"),
-                        "type": f"STATUS_CHANGE",
-                        "description": f"{log.get('old_status', 'unknown')} → {log.get('new_status', 'unknown')} (by {log.get('changed_by', 'system')}): {log.get('note', '')}"
-                    })
-
-                for event in events or []:
-                    timeline_events.append({
-                        "time": event.get("created_at"),
-                        "type": "CARRIER_EVENT",
-                        "description": f"{event.get('event_type', 'unknown')}: {event.get('parsed_notes', '')} (Amount: ${float(event.get('settlement_amount', 0)):.2f})"
-                    })
-
-                timeline_events.sort(key=lambda x: x["time"] or "")
-
-                for event in timeline_events:
-                    with st.expander(f"{event['type']} - {event['time']}"):
-                        st.write(event['description'])
+                    if col2.button("❌ Reject", key=f"reject_{msg['id']}"):
+                        from outreach_gateway import reject_outreach
+                        reject_outreach(msg['id'], current_user.get("username"), reason="Rejected by admin in Outreach Approval Queue.")
+                        st.success("Message rejected. Lead reverted to 'approved' for review/edit.")
+                        st.rerun()
         else:
-            st.info("No claims available.")
+            st.info("No pending outreach messages.")
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 9: ALERTS ---
-with tabs[9]:
+
+if selected_page == "💰 Settlement Payouts":
+    st.subheader("💰 Settlement Payouts")
+    st.warning("⚠️ PAYMENT AUTHORIZATION - Confirm carefully before processing.")
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id::text, claimant_name, claimant_email, carrier_name, recovery_amount, fee_collected
+                FROM leads
+                WHERE status = 'settled'
+                ORDER BY updated_at DESC
+                LIMIT 50;
+            """)
+            settled = cur.fetchall()
+        conn.close()
+
+        if settled:
+            for lead in settled:
+                net = float(lead['recovery_amount'] or 0) - float(lead['fee_collected'] or 0)
+                with st.expander(f"{lead['claimant_name']} - ${float(lead['recovery_amount']):.2f} from {lead['carrier_name']}", expanded=False):
+                    st.metric("Net to Claimant", f"${net:.2f}")
+                    st.caption(f"Email: {lead['claimant_email']}")
+
+                    if st.button("💳 Confirm & Pay", key=f"pay_{lead['id']}"):
+                        from payout_processor import execute_payout
+                        success, msg = execute_payout(lead['id'], current_user.get("username"))
+                        if success:
+                            st.success(f"✅ Payout initiated: {msg}")
+                        else:
+                            st.error(f"❌ Payout failed: {msg}")
+        else:
+            st.info("No settled claims pending payout.")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+
+if selected_page == "🚨 System Alerts":
     st.subheader("🚨 System Alerts")
     try:
         conn = get_db()
@@ -1478,7 +1569,7 @@ with tabs[9]:
                                 UPDATE system_alerts
                                 SET acknowledged = TRUE, acknowledged_by = %s, acknowledged_at = NOW()
                                 WHERE id::text = %s;
-                            """, (user_info.get("username"), alert['id']))
+                            """, (current_user.get("username"), alert['id']))
                         conn.close()
                         st.success("Alert acknowledged.")
                         st.rerun()
@@ -1487,85 +1578,28 @@ with tabs[9]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 10: OUTREACH APPROVAL QUEUE ---
-with tabs[10]:
-    st.subheader("📤 Outreach Approval Queue")
-    st.info("Review and approve all outbound SMS/DM messages before they are sent to claimants.")
+
+if selected_page == "⚠️ Dead-Letter Queue":
+    st.subheader("⚠️ Dead-Letter Queue (DLQ) & Dispatch Failures")
+    st.caption("Review leads where outbound dispatch failed repeatedly and trigger manual retries.")
+
     try:
         conn = get_db()
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id::text, lead_id::text, channel, recipient, message_body, created_at
-                FROM outreach_queue
-                WHERE status = 'pending_approval'
-                ORDER BY created_at ASC;
-            """)
-            pending = cur.fetchall()
+            cur.execute("SELECT id::text AS id, vertical, carrier_name, claimant_email, dispatch_attempts, last_dispatch_error, last_dispatch_attempt_at FROM leads WHERE status = 'dispatch_failed' ORDER BY last_dispatch_attempt_at DESC;")
+            dlq_leads = cur.fetchall()
         conn.close()
 
-        if pending:
-            for msg in pending:
-                with st.expander(f"{msg['channel'].upper()} to {msg['recipient']} ({msg['created_at']})", expanded=True):
-                    st.text_area("Message Body", value=msg['message_body'], disabled=True, height=100)
-
-                    col1, col2 = st.columns(2)
-                    if col1.button("✅ Approve & Send", key=f"send_{msg['id']}"):
-                        from outreach_gateway import dispatch_approved_outreach
-                        ok, note = dispatch_approved_outreach(msg['id'], user_info.get("username"))
-                        if ok:
-                            st.success(f"✅ Sent to {msg['recipient']}: {note}")
-                        else:
-                            st.error(f"❌ Send failed: {note}")
-                        st.rerun()
-
-                    if col2.button("❌ Reject", key=f"reject_{msg['id']}"):
-                        from outreach_gateway import reject_outreach
-                        reject_outreach(msg['id'], user_info.get("username"), reason="Rejected by admin in Outreach Approval Queue.")
-                        st.success("Message rejected. Lead reverted to 'approved' for review/edit.")
-                        st.rerun()
+        if dlq_leads:
+            df_dlq = pd.DataFrame(dlq_leads)
+            st.dataframe(df_dlq, use_container_width=True)
         else:
-            st.info("No pending outreach messages.")
+            st.info("Dead-letter queue is clear. No failed dispatches found.")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error loading DLQ: {e}")
 
-# --- TAB 11: SETTLEMENT PAYOUTS ---
-with tabs[11]:
-    st.subheader("💰 Settlement Payouts")
-    st.warning("⚠️ PAYMENT AUTHORIZATION - Confirm carefully before processing.")
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id::text, claimant_name, claimant_email, carrier_name, recovery_amount, fee_collected
-                FROM leads
-                WHERE status = 'settled'
-                ORDER BY updated_at DESC
-                LIMIT 50;
-            """)
-            settled = cur.fetchall()
-        conn.close()
 
-        if settled:
-            for lead in settled:
-                net = float(lead['recovery_amount'] or 0) - float(lead['fee_collected'] or 0)
-                with st.expander(f"{lead['claimant_name']} - ${float(lead['recovery_amount']):.2f} from {lead['carrier_name']}", expanded=False):
-                    st.metric("Net to Claimant", f"${net:.2f}")
-                    st.caption(f"Email: {lead['claimant_email']}")
-
-                    if st.button("💳 Confirm & Pay", key=f"pay_{lead['id']}"):
-                        from payout_processor import execute_payout
-                        success, msg = execute_payout(lead['id'], user_info.get("username"))
-                        if success:
-                            st.success(f"✅ Payout initiated: {msg}")
-                        else:
-                            st.error(f"❌ Payout failed: {msg}")
-        else:
-            st.info("No settled claims pending payout.")
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-# --- TAB 12: STALLED CLAIMS ---
-with tabs[12]:
+if selected_page == "⏳ Stalled Claims":
     st.subheader("⏳ Stalled Claims")
     try:
         conn = get_db()
@@ -1598,8 +1632,8 @@ with tabs[12]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 13: PIPELINE KPIs ---
-with tabs[13]:
+
+if selected_page == "📊 Performance Reports":
     st.subheader("📊 Pipeline KPIs")
     try:
         conn = get_db()
@@ -1664,8 +1698,82 @@ with tabs[13]:
     except Exception as e:
         st.error(f"Error: {e}")
 
-# --- TAB 14: OPERATIONS MANUAL ---
-with tabs[14]:
+
+if selected_page == "📥 Webhook Audit":
+    st.subheader("📥 Inbound Carrier Webhook Audit")
+    st.caption("Inspect raw webhook payloads received from carriers regarding settlements and dispute updates.")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text AS id, lead_id::text AS lead_id, carrier_name, vertical, event_type, settlement_amount, parsed_notes, raw_payload, created_at FROM carrier_inbound_events ORDER BY created_at DESC LIMIT 100;")
+            events = cur.fetchall()
+        conn.close()
+
+        if events:
+            df_events = pd.DataFrame(events)
+            st.dataframe(df_events[["id", "carrier_name", "vertical", "event_type", "settlement_amount", "created_at"]], use_container_width=True)
+        else:
+            st.info("No inbound webhook events recorded yet.")
+    except Exception as e:
+        st.error(f"Error loading webhook audit: {e}")
+
+
+if selected_page == "📋 System Logs":
+    st.subheader("📊 System Telemetry & Historical Audit Logs")
+    st.caption("Search across the entire history of system telemetry, worker executions, email dispatches, and errors.")
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        log_level_filter = st.selectbox("Filter Log Level", ["All Levels", "INFO", "WARNING", "ERROR", "CRITICAL"], key="telemetry_level_filter")
+    with col_s2:
+        date_start = st.date_input("Start Date", value=None, key="telemetry_start_date")
+    with col_s3:
+        date_end = st.date_input("End Date", value=None, key="telemetry_end_date")
+
+    search_keyword = st.text_input("🔍 Full-Text Search Logs (Message, Service, Lead ID, or Keyword)", key="telemetry_keyword_search")
+
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            sql = "SELECT id::text AS id, service_name, event_category, log_level, message, lead_id::text AS lead_id, metadata, created_at FROM system_audit_logs WHERE 1=1"
+            sql_params = []
+            if log_level_filter != "All Levels":
+                sql += " AND log_level = %s"
+                sql_params.append(log_level_filter)
+            if date_start:
+                sql += " AND created_at::date >= %s"
+                sql_params.append(date_start)
+            if date_end:
+                sql += " AND created_at::date <= %s"
+                sql_params.append(date_end)
+            if search_keyword:
+                sql += " AND (message ILIKE %s OR service_name ILIKE %s OR lead_id::text ILIKE %s OR metadata::text ILIKE %s)"
+                kw = f"%{search_keyword}%"
+                sql_params.extend([kw, kw, kw, kw])
+
+            sql += " ORDER BY created_at DESC LIMIT 5000;"
+            cur.execute(sql, tuple(sql_params))
+            found_logs = cur.fetchall()
+        conn.close()
+
+        if found_logs:
+            df_fl = pd.DataFrame(found_logs)
+            st.metric("Total Logs Matching Query", len(df_fl))
+            st.dataframe(df_fl[["created_at", "service_name", "event_category", "log_level", "message", "lead_id"]], use_container_width=True)
+
+            sel_lid = st.selectbox("Inspect Full Metadata for Log ID", df_fl["id"].tolist(), key="sel_log_meta_id")
+            selected_l = df_fl[df_fl["id"] == sel_lid].iloc[0]
+            st.markdown(f"**Service:** `{selected_l['service_name']}` | **Category:** `{selected_l['event_category']}` | **Level:** `{selected_l['log_level']}`")
+            st.markdown(f"**Message:** {selected_l['message']}")
+            st.json(selected_l["metadata"] or {})
+        else:
+            st.info("No logs found matching search criteria.")
+    except Exception as e:
+        st.error(f"Error querying telemetry logs: {e}")
+
+
+if selected_page == "📖 Help & User Guide":
     st.header("📖 Dispute Agent Platform: Complete Operations Manual")
     st.caption("Standard Operating Procedures, Claim Lifecycle Guidelines, and Troubleshooting Reference.")
 
@@ -1692,39 +1800,39 @@ with tabs[14]:
                  └──▶ [rejected]                                  └──▶ [dispatch_failed (DLQ)]
         ```
 
-        * **`staged_for_review`**: 
+        * **`staged_for_review`**:
           * *What it means:* A new disruption has been detected or submitted. The AI has calculated the legal basis and estimated valuation, but no outreach has been sent yet.
-          * *Action required:* Review the lead in **Tab 0 (`Ingestion Queue`)**, ensure the outreach copy is consumer-directed, and click **Approve** or **Dismiss**.
-        * **`approved`**: 
+          * *Action required:* Review the lead in **Ingestion Queue** (under Leads & Intake), ensure the outreach copy is consumer-directed, and click **Approve** or **Dismiss**.
+        * **`approved`**:
           * *What it means:* An operator has approved the outreach text. The claim is queued for notification.
-        * **`contacted`**: 
+        * **`contacted`**:
           * *What it means:* The claimant has been sent their unique authorization URL (`/?claim_id=<UUID>`).
-        * **`opted_in`**: 
+        * **`opted_in`**:
           * *What it means:* The consumer opened the link, entered their contact information, signed the contingency agreement digitally, and authorized EasyClaim to represent them.
-        * **`dispatched`**: 
+        * **`dispatched`**:
           * *What it means:* The system automatically compiled the ReportLab statutory PDF demand letter, served it to the respondent's legal department via email/SMTP, and sent a confirmation SMS to the claimant's phone. A 14-day statutory compliance countdown is now active.
-        * **`settled`**: 
+        * **`settled`**:
           * *What it means:* The airline, utility, or landlord approved the claim. The gross settlement and 25% platform contingency fee have been recorded, and an alert SMS has been dispatched to the consumer.
-        * **`rejected`**: 
+        * **`rejected`**:
           * *What it means:* The claim was dismissed as non-viable or outside the statutory scope.
-        * **`dispatch_failed` (DLQ)**: 
-          * *What it means:* An email transmission error occurred 5 times consecutively. The claim is held safely in the Dead-Letter Queue for operator remediation.
+        * **`dispatch_failed` (DLQ)**:
+          * *What it means:* An email transmission error occurred 5 times consecutively (retries happen automatically in the background with exponential backoff). The claim is held safely in the Dead-Letter Queue and a System Alert is raised for operator remediation.
         """)
 
     with st.expander("3. Step-by-Step Operator Instructions (From Ingest to Payout)", expanded=True):
         st.markdown("""
         ### Step 1: Handling Inbound Consumer Complaints
-        * **Option A: Social Media Ingestion (Tab 0)**
-          * Open **Tab 0 (`Ingestion Queue`)**.
+        * **Option A: Social Media Ingestion**
+          * Open **Ingestion Queue** (Leads & Intake).
           * Select any staged claim from the dropdown.
           * Review the **Respondent Entity**, **Estimated Valuation**, and the **AI Statutory Reasoning**.
           * Verify that the outreach text explains what the company owes them. Click **Approve & Stage Outreach**.
-        * **Option B: Direct Client Inbound (Tab 1)**
-          * If a customer contacts you directly via email or phone, open **Tab 1 (`Direct Manual Intake`)**.
+        * **Option B: Direct Client Inbound**
+          * If a customer contacts you directly via email or phone, open **Direct Intake** (Leads & Intake).
           * Paste their complaint into the **AI-Assisted** box and click **Analyze Statutory Viability**.
           * Copy the generated client link (`/?claim_id=<UUID>`) and send it directly to the consumer.
         * **Option C: Public Website Submissions (EasyClaim Landing Page)**
-          * Consumers who visit `https://dispute-api-xyl7.onrender.com/#claim` can submit their details and digital signature directly.
+          * Consumers who visit the public landing page can submit their details and digital signature directly.
           * These claims are automatically created with status `opted_in`, their PDF demand is dispatched to the carrier legal desk immediately, and a confirmation SMS is sent to their phone without requiring manual intervention.
 
         ### Step 2: Customer Authorization & E-Signature
@@ -1735,13 +1843,13 @@ with tabs[14]:
         * Once submitted, the system triggers the ReportLab PDF compilation and SMTP dispatch.
 
         ### Step 3: Carrier Demand Dispatch & Compliance Tracking
-        * Once the status reaches `dispatched`, open **Tab 3 (`Active Claims`)** to monitor the case portfolio.
+        * Once the status reaches `dispatched`, open **Active Claims** (Claims & Customers) to monitor the case portfolio.
         * The demand letter is on file with the respondent company's legal department with a formal 14 business day response notice.
 
         ### Step 4: Settlement Reconciliation & 25% Fee Collection
         * When a carrier approves compensation, they send a webhook notice or payout tender.
-        * If automated, the webhook updates the status to `settled`, computes $\\text{recovery} \\times 0.25$, and logs the contingency fee.
-        * For manual settlement checks, enter the gross amount in the settlement endpoint to update the case and dispatch a settlement notification SMS to the claimant.
+        * If automated, the webhook updates the status to `settled`, computes recovery × 0.25, and logs the contingency fee.
+        * Approved payouts are confirmed manually in **Settlement Payouts** (Outreach & Payouts) before funds move, and a settlement notification SMS is sent to the claimant.
         """)
 
     with st.expander("4. The Four Supported Dispute Verticals & Legal Rules", expanded=False):
@@ -1756,87 +1864,83 @@ with tabs[14]:
 
     with st.expander("5. Managing Website Messages & Direct Inquiries", expanded=False):
         st.markdown("""
-        * Visitors who submit messages through the contact form at `https://dispute-api-xyl7.onrender.com/#contact` are routed directly to **Tab 2 (`Customer Inquiries`)**.
-        * Open **Tab 2** to inspect the sender's name, email, subject line, and full message text.
+        * Visitors who submit messages through the public contact form are routed directly to **Customer Inquiries** (Leads & Intake).
+        * Open that page to inspect the sender's name, email, subject line, and full message text.
         * After responding to the customer, click **Mark as Read / Processed** to keep the queue organized.
         """)
 
     with st.expander("6. Troubleshooting & Dead-Letter Queue (DLQ) Remediation", expanded=False):
         st.markdown("""
         * **When does a claim enter the DLQ?**
-          * If an airline legal email address rejects the demand package or the SMTP server experiences a timeout, the background worker will retry automatically up to 5 times using exponential backoff ($2^1, 2^2, 2^3, 2^4, 2^5$ minutes).
-          * If all 5 attempts fail, the claim enters **Tab 5 (`Dead-Letter Queue`)** as `dispatch_failed`.
+          * If an airline legal email address rejects the demand package or the SMTP server experiences a timeout, the background worker retries automatically up to 5 times using exponential backoff (2¹, 2², 2³, 2⁴, 2⁵ minutes).
+          * If all 5 attempts fail, the claim moves to **Dead-Letter Queue** (Monitoring & Alerts) as `dispatch_failed`, and a System Alert is raised so it isn't missed.
         * **How to remediate a DLQ record:**
-          1. Open **Tab 5 (`Dead-Letter Queue`)**.
-          2. Inspect the **Last Dispatch Error** column to see why the email failed (e.g., invalid carrier address or connection timeout).
-          3. Select the claim from the dropdown.
-          4. Click **🔄 Force Immediate Re-Dispatch** to clear the attempt counter and trigger an immediate re-send.
+          1. Open **Dead-Letter Queue** (Monitoring & Alerts) to see which claims failed and why (**Last Dispatch Error** column).
+          2. Open **System Alerts** (Monitoring & Alerts) and acknowledge the corresponding alert once you've followed up.
+          3. Manual re-dispatch of a DLQ record currently requires updating its status directly in the database — there is no in-app retry button yet.
         """)
 
-    with st.expander("7. System Administration, API Keys & 2FA Security", expanded=False):
+    with st.expander("7. System Administration & Integration Settings", expanded=False):
         st.markdown("""
         * **Vendor Integration Settings (Super Admin Only):**
           * In the left sidebar, Super Admins can expand **⚙️ Vendor & Service Integrations**.
-          * You can update your **Twilio SMS keys**, **Stripe API secrets**, **SMTP Email credentials**, and **Monitored Subreddits** dynamically.
-          * Clicking **Save Integration Settings** updates the database immediately with no code deployment required.
-        * **Two-Factor Authentication (2FA):**
-          * Every operator can secure their account in the sidebar under **🔐 Two-Factor Security**.
-          * Click **Enable 2FA Authenticator**, scan the QR code using Google Authenticator, 1Password, or Authy, enter the 6-digit verification code, and click **Activate 2FA**.
+          * You can update **Twilio SMS keys**, **Stripe API secrets**, **SMTP email credentials**, **Reddit/Bluesky/Twitter API credentials**, and **Monitored Subreddits** dynamically.
+          * Clicking **Save Integration Settings** encrypts and stores the values in the database immediately — no code deployment required.
         * **Provisioning New Team Logins (Super Admin Only):**
-          * Super Admins have access to **Tab 8 (`User Administration`)** to create accounts for team members.
+          * Super Admins have access to **User Management** (under Admin) to create accounts for team members.
           * Assign roles based on access needs: `claims_agent` (review only), `claims_manager` (review + DLQ actions), `auditor` (read-only), or `super_admin` (full system access).
+        * **Note on Two-Factor Authentication:** the login screen supports 2FA verification for accounts that have it enabled, but there is currently no self-service page to turn 2FA on — reach out to a Super Admin if you need it enabled on your account.
         """)
 
-# --- TAB 15: USER ADMINISTRATION (SUPER ADMIN ONLY) ---
-if user_role == "super_admin" and len(tabs) > 15:
-    with tabs[15]:
-        st.subheader("👥 User Management & Role Provisioning")
-        col_new_user, col_user_list = st.columns([1, 1.4])
 
-        with col_new_user:
-            st.markdown("#### Provision New User")
-            with st.form("form_create_user"):
-                new_username = st.text_input("Username").strip().lower()
-                new_full_name = st.text_input("Full Name")
-                new_password = st.text_input("Temporary Password", type="password")
-                new_role = st.selectbox("Assign Role", [
-                    ("claims_agent", "Claims Agent (Queue Review & Outreach)"),
-                    ("claims_manager", "Claims Manager (Queue & DLQ Control)"),
-                    ("auditor", "Auditor (Read-Only Telemetry)"),
-                    ("super_admin", "Super Admin (Full Access & User Admin)")
-                ], format_func=lambda x: x[1])[0]
+if user_role == "super_admin" and selected_page == "👥 User Management":
+    st.subheader("👥 User Management & Role Provisioning")
+    col_new_user, col_user_list = st.columns([1, 1.4])
 
-                if st.form_submit_button("Create User Account"):
-                    if not new_username or not new_password or not new_full_name:
-                        st.error("All fields are required.")
-                    else:
-                        try:
-                            hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                            seed = pyotp.random_base32()
-                            conn = get_db()
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    INSERT INTO admin_users (username, full_name, password_hash, role, is_2fa_enabled, totp_secret)
-                                    VALUES (%s, %s, %s, %s, FALSE, %s);
-                                """, (new_username, new_full_name, hashed, new_role, seed))
-                            conn.close()
-                            st.success(f"User `{new_username}` created.")
-                            st.rerun()
-                        except psycopg2.IntegrityError:
-                            st.error(f"Username `{new_username}` already exists.")
-                        except Exception as e:
-                            st.error(f"Error: {e}")
+    with col_new_user:
+        st.markdown("#### Provision New User")
+        with st.form("form_create_user"):
+            new_username = st.text_input("Username").strip().lower()
+            new_full_name = st.text_input("Full Name")
+            new_password = st.text_input("Temporary Password", type="password")
+            new_role = st.selectbox("Assign Role", [
+                ("claims_agent", "Claims Agent (Queue Review & Outreach)"),
+                ("claims_manager", "Claims Manager (Queue & DLQ Control)"),
+                ("auditor", "Auditor (Read-Only Telemetry)"),
+                ("super_admin", "Super Admin (Full Access & User Admin)")
+            ], format_func=lambda x: x[1])[0]
 
-        with col_user_list:
-            st.markdown("#### Active System Users")
-            try:
-                conn = get_db()
-                with conn.cursor() as cur:
-                    cur.execute("SELECT id::text AS id, username, full_name, role, is_2fa_enabled, is_active, created_at FROM admin_users ORDER BY created_at ASC;")
-                    all_users = cur.fetchall()
-                conn.close()
-                if all_users:
-                    st.dataframe(pd.DataFrame(all_users)[["username", "full_name", "role", "is_2fa_enabled", "is_active"]])
-            except Exception as e:
-                st.error(f"Error: {e}")
+            if st.form_submit_button("Create User Account"):
+                if not new_username or not new_password or not new_full_name:
+                    st.error("All fields are required.")
+                else:
+                    try:
+                        hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                        seed = pyotp.random_base32()
+                        conn = get_db()
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO admin_users (username, full_name, password_hash, role, is_2fa_enabled, totp_secret)
+                                VALUES (%s, %s, %s, %s, FALSE, %s);
+                            """, (new_username, new_full_name, hashed, new_role, seed))
+                        conn.close()
+                        st.success(f"User `{new_username}` created.")
+                        st.rerun()
+                    except psycopg2.IntegrityError:
+                        st.error(f"Username `{new_username}` already exists.")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    with col_user_list:
+        st.markdown("#### Active System Users")
+        try:
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT id::text AS id, username, full_name, role, is_2fa_enabled, is_active, created_at FROM admin_users ORDER BY created_at ASC;")
+                all_users = cur.fetchall()
+            conn.close()
+            if all_users:
+                st.dataframe(pd.DataFrame(all_users)[["username", "full_name", "role", "is_2fa_enabled", "is_active"]])
+        except Exception as e:
+            st.error(f"Error: {e}")
 
