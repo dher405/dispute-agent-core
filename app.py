@@ -311,61 +311,166 @@ with st.sidebar:
 
     # Dynamic Vendor Integrations Panel (Super Admin Only)
     if user_role == "super_admin":
-        st.subheader("⚙️ Vendor & Service Integrations")
-        with st.expander("Configure 3rd Party APIs"):
+        # --- 3RD PARTY VENDOR & API CREDENTIALS CONFIGURATION ---
+        st.divider()
+        st.subheader('🔑 3rd Party Vendor & API Integration Vault')
+        st.caption('Configure and persist credentials for social automation, AT Protocol relays, and SMTP carrier dispatches.')
+        try:
             conn = get_db()
             with conn.cursor() as cur:
-                cur.execute("SELECT key, value, category, description FROM system_settings ORDER BY category, key;")
-                settings_rows = cur.fetchall()
+                cur.execute("SELECT key, value FROM system_settings WHERE category IN ('reddit_api', 'bluesky_api', 'smtp_gateway') ORDER BY key;")
+                existing_settings = dict(cur.fetchall())
             conn.close()
-
-            settings_dict = {row["key"]: row["value"] for row in settings_rows}
-
-            st.markdown("**Twilio SMS Gateway**")
-            new_tw_sid = st.text_input("Twilio Account SID", value=settings_dict.get("TWILIO_ACCOUNT_SID", ""))
-            new_tw_token = st.text_input("Twilio Auth Token", value=settings_dict.get("TWILIO_AUTH_TOKEN", ""), type="password")
-            new_tw_phone = st.text_input("Twilio Phone Number", value=settings_dict.get("TWILIO_PHONE_NUMBER", ""))
-
-            st.markdown("**Stripe Payouts & Settlement**")
-            new_st_sec = st.text_input("Stripe Secret Key", value=settings_dict.get("STRIPE_SECRET_KEY", ""), type="password")
-            new_st_pub = st.text_input("Stripe Publishable Key", value=settings_dict.get("STRIPE_PUBLISHABLE_KEY", ""))
-
-            st.markdown("**Carrier Demand SMTP Email**")
-            new_smtp_host = st.text_input("SMTP Host", value=settings_dict.get("SMTP_HOST", "smtp.gmail.com"))
-            new_smtp_port = st.text_input("SMTP Port", value=settings_dict.get("SMTP_PORT", "587"))
-            new_smtp_user = st.text_input("SMTP User / Email", value=settings_dict.get("SMTP_USER", ""))
-            new_smtp_pass = st.text_input("SMTP Password", value=settings_dict.get("SMTP_PASS", ""), type="password")
-
-            st.markdown("**Social Ingestion Monitoring**")
-            new_subs = st.text_area("Monitored Subreddits (comma separated)", value=settings_dict.get("MONITORED_SUBREDDITS", ""))
-            new_poll = st.text_input("Poll Cadence (seconds)", value=settings_dict.get("POLL_INTERVAL_SECONDS", "60"))
-
-            if st.button("💾 Save Integration Settings"):
+            tab_r, tab_b, tab_s = st.tabs(['🤖 Reddit API (OAuth)', '🦋 Bluesky AT Protocol', '⚖️ SMTP / Carrier Legal'])
+            with tab_r:
+                st.markdown('#### Reddit OAuth Script Application Configuration')
+                st.caption('Required for automated thread replies and direct messages under the Responsible Builder Policy.')
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    r_client_id = st.text_input('Reddit Client ID', value=existing_settings.get('reddit_client_id', ''), key='cfg_reddit_client_id')
+                    r_client_secret = st.text_input('Reddit Client Secret', value=existing_settings.get('reddit_client_secret', ''), type='password', key='cfg_reddit_client_secret')
+                    r_user_agent = st.text_input('Custom User-Agent Header', value=existing_settings.get('reddit_user_agent', 'python:EasyClaimDisputeAgent:v1.0 (by /u/EasyClaimApp)'), key='cfg_reddit_user_agent')
+                with col_r2:
+                    r_username = st.text_input('Reddit Service Account Username', value=existing_settings.get('reddit_username', ''), key='cfg_reddit_username')
+                    r_password = st.text_input('Reddit Account Password', value=existing_settings.get('reddit_password', ''), type='password', key='cfg_reddit_password')
+                    r_subreddits = st.text_area('Subreddits to Monitor (Comma separated)', value=existing_settings.get('reddit_subreddits', 'unitedairlines, delta, americanairlines, flights, travel, Comcast, Comcast_Xfinity'), height=68, key='cfg_reddit_subreddits')
+                if st.button('💾 Save Reddit Credentials', key='btn_save_reddit_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        records = [
+                            ('reddit_client_id', r_client_id, 'reddit_api', 'OAuth Client ID for Reddit Data API'),
+                            ('reddit_client_secret', r_client_secret, 'reddit_api', 'OAuth Client Secret for Reddit Data API'),
+                            ('reddit_username', r_username, 'reddit_api', 'Designated Reddit service username'),
+                            ('reddit_password', r_password, 'reddit_api', 'Reddit service account password'),
+                            ('reddit_user_agent', r_user_agent, 'reddit_api', 'Reddit RFC compliant user-agent string'),
+                            ('reddit_subreddits', r_subreddits, 'reddit_api', 'Active subreddits monitored by scraper daemon')
+                        ]
+                        for k, v, cat, desc in records:
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, description, updated_at)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE 
+                                SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                            """, (k, v, cat, desc))
+                    conn.close()
+                    st.success('Reddit OAuth credentials saved to system_settings.')
+                    st.rerun()
+            with tab_b:
+                st.markdown('#### Bluesky Social & AT Protocol Integration')
+                st.caption('Configure Bluesky handle and App Passwords to poll the AT Protocol firehose and reply.')
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    b_handle = st.text_input('Bluesky Handle / DID (e.g. easyclaim.bsky.social)', value=existing_settings.get('bluesky_handle', ''), key='cfg_bluesky_handle')
+                    b_app_password = st.text_input('Bluesky App Password', value=existing_settings.get('bluesky_app_password', ''), type='password', key='cfg_bluesky_app_password')
+                with col_b2:
+                    b_pds_url = st.text_input('PDS Endpoint URL', value=existing_settings.get('bluesky_pds_url', 'https://bsky.social'), key='cfg_bluesky_pds_url')
+                    b_keywords = st.text_area('Target Keywords', value=existing_settings.get('bluesky_keywords', 'flight canceled, flight delayed, united airlines, delta cancel, comcast outage, spectrum down'), height=68, key='cfg_bluesky_keywords')
+                if st.button('💾 Save Bluesky Credentials', key='btn_save_bluesky_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        records = [
+                            ('bluesky_handle', b_handle, 'bluesky_api', 'Bluesky account identifier'),
+                            ('bluesky_app_password', b_app_password, 'bluesky_api', 'App-specific password'),
+                            ('bluesky_pds_url', b_pds_url, 'bluesky_api', 'Bluesky personal data server host'),
+                            ('bluesky_keywords', b_keywords, 'bluesky_api', 'Keywords scanned across AT Protocol')
+                        ]
+                        for k, v, cat, desc in records:
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, description, updated_at)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE 
+                                SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                            """, (k, v, cat, desc))
+                    conn.close()
+                    st.success('Bluesky AT Protocol credentials successfully persisted.')
+                    st.rerun()
+            with tab_s:
+                st.markdown('#### SMTP Carrier Legal Desk Transmission Gateway')
+                st.caption('Configure the outbound SMTP mailer for delivering formal ReportLab PDF demands.')
+                col_s1, col_s2 = st.columns(2)
+                with col_s1:
+                    s_host = st.text_input('SMTP Server Host', value=existing_settings.get('smtp_host', 'smtp.sendgrid.net'), key='cfg_smtp_host')
+                    s_port = st.text_input('SMTP Port', value=existing_settings.get('smtp_port', '587'), key='cfg_smtp_port')
+                    s_from = st.text_input('Legal Service Sender Email', value=existing_settings.get('smtp_from_email', 'legal@easyclaim.us'), key='cfg_smtp_from')
+                with col_s2:
+                    s_user = st.text_input('SMTP Username', value=existing_settings.get('smtp_username', 'apikey'), key='cfg_smtp_user')
+                    s_pass = st.text_input('SMTP Secret Key / Password', value=existing_settings.get('smtp_password', ''), type='password', key='cfg_smtp_pass')
+                if st.button('💾 Save SMTP Gateway Settings', key='btn_save_smtp_cfg'):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        records = [
+                            ('smtp_host', s_host, 'smtp_gateway', 'Outbound legal SMTP server address'),
+                            ('smtp_port', s_port, 'smtp_gateway', 'Outbound legal SMTP port'),
+                            ('smtp_from_email', s_from, 'smtp_gateway', 'Official legal sender address'),
+                            ('smtp_username', s_user, 'smtp_gateway', 'SMTP relay user identifier'),
+                            ('smtp_password', s_pass, 'smtp_gateway', 'SMTP relay password')
+                        ]
+                        for k, v, cat, desc in records:
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, description, updated_at)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE 
+                                SET value = EXCLUDED.value, category = EXCLUDED.category, updated_at = NOW();
+                            """, (k, v, cat, desc))
+                    conn.close()
+                    st.success('SMTP gateway settings saved to system_settings.')
+                    st.rerun()
+        except Exception as e:
+            st.error(f'Error loading vendor configuration vault: {e}')
+            st.subheader("⚙️ Vendor & Service Integrations")
+            with st.expander("Configure 3rd Party APIs"):
                 conn = get_db()
                 with conn.cursor() as cur:
-                    updates = [
-                        ("TWILIO_ACCOUNT_SID", new_tw_sid, "twilio"),
-                        ("TWILIO_AUTH_TOKEN", new_tw_token, "twilio"),
-                        ("TWILIO_PHONE_NUMBER", new_tw_phone, "twilio"),
-                        ("STRIPE_SECRET_KEY", new_st_sec, "stripe"),
-                        ("STRIPE_PUBLISHABLE_KEY", new_st_pub, "stripe"),
-                        ("SMTP_HOST", new_smtp_host, "smtp"),
-                        ("SMTP_PORT", new_smtp_port, "smtp"),
-                        ("SMTP_USER", new_smtp_user, "smtp"),
-                        ("SMTP_PASS", new_smtp_pass, "smtp"),
-                        ("MONITORED_SUBREDDITS", new_subs, "monitoring"),
-                        ("POLL_INTERVAL_SECONDS", new_poll, "monitoring")
-                    ]
-                    for k, val, cat in updates:
-                        cur.execute("""
-                            INSERT INTO system_settings (key, value, category, updated_at)
-                            VALUES (%s, %s, %s, NOW())
-                            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
-                        """, (k, val, cat))
+                    cur.execute("SELECT key, value, category, description FROM system_settings ORDER BY category, key;")
+                    settings_rows = cur.fetchall()
                 conn.close()
-                st.success("Integration settings saved to database!")
-                st.rerun()
 
+                settings_dict = {row["key"]: row["value"] for row in settings_rows}
+
+                st.markdown("**Twilio SMS Gateway**")
+                new_tw_sid = st.text_input("Twilio Account SID", value=settings_dict.get("TWILIO_ACCOUNT_SID", ""))
+                new_tw_token = st.text_input("Twilio Auth Token", value=settings_dict.get("TWILIO_AUTH_TOKEN", ""), type="password")
+                new_tw_phone = st.text_input("Twilio Phone Number", value=settings_dict.get("TWILIO_PHONE_NUMBER", ""))
+
+                st.markdown("**Stripe Payouts & Settlement**")
+                new_st_sec = st.text_input("Stripe Secret Key", value=settings_dict.get("STRIPE_SECRET_KEY", ""), type="password")
+                new_st_pub = st.text_input("Stripe Publishable Key", value=settings_dict.get("STRIPE_PUBLISHABLE_KEY", ""))
+
+                st.markdown("**Carrier Demand SMTP Email**")
+                new_smtp_host = st.text_input("SMTP Host", value=settings_dict.get("SMTP_HOST", "smtp.gmail.com"))
+                new_smtp_port = st.text_input("SMTP Port", value=settings_dict.get("SMTP_PORT", "587"))
+                new_smtp_user = st.text_input("SMTP User / Email", value=settings_dict.get("SMTP_USER", ""))
+                new_smtp_pass = st.text_input("SMTP Password", value=settings_dict.get("SMTP_PASS", ""), type="password")
+
+                st.markdown("**Social Ingestion Monitoring**")
+                new_subs = st.text_area("Monitored Subreddits (comma separated)", value=settings_dict.get("MONITORED_SUBREDDITS", ""))
+                new_poll = st.text_input("Poll Cadence (seconds)", value=settings_dict.get("POLL_INTERVAL_SECONDS", "60"))
+
+                if st.button("💾 Save Integration Settings"):
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        updates = [
+                            ("TWILIO_ACCOUNT_SID", new_tw_sid, "twilio"),
+                            ("TWILIO_AUTH_TOKEN", new_tw_token, "twilio"),
+                            ("TWILIO_PHONE_NUMBER", new_tw_phone, "twilio"),
+                            ("STRIPE_SECRET_KEY", new_st_sec, "stripe"),
+                            ("STRIPE_PUBLISHABLE_KEY", new_st_pub, "stripe"),
+                            ("SMTP_HOST", new_smtp_host, "smtp"),
+                            ("SMTP_PORT", new_smtp_port, "smtp"),
+                            ("SMTP_USER", new_smtp_user, "smtp"),
+                            ("SMTP_PASS", new_smtp_pass, "smtp"),
+                            ("MONITORED_SUBREDDITS", new_subs, "monitoring"),
+                            ("POLL_INTERVAL_SECONDS", new_poll, "monitoring")
+                        ]
+                        for k, val, cat in updates:
+                            cur.execute("""
+                                INSERT INTO system_settings (key, value, category, updated_at)
+                                VALUES (%s, %s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+                            """, (k, val, cat))
+                    conn.close()
+                    st.success("Integration settings saved to database!")
+                    st.rerun()
         st.divider()
 
     if st.button("🚪 Sign Out"):
@@ -1263,3 +1368,4 @@ if user_role == "super_admin" and len(tabs) > 8:
                     st.dataframe(pd.DataFrame(all_users)[["username", "full_name", "role", "is_2fa_enabled", "is_active"]])
             except Exception as e:
                 st.error(f"Error: {e}")
+
